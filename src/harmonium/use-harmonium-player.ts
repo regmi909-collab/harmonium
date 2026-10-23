@@ -13,7 +13,13 @@ export type ReedMode = 'single' | 'double';
 const REFERENCE_SAMPLE_URL = '/harmonium-kannan-orig.wav';
 const REFERENCE_REVERB_URL = '/reverb.wav';
 const REFERENCE_ROOT_MIDI = 62;
+// Start 65ms into the WAV where the reed is already at full resonance (0-50ms is quiet wind-up)
+const REFERENCE_START_OFFSET = 0.065;
 const REFERENCE_LOOP_START = 0.5;
+
+// Minimum durations so quick taps and double-taps always speak clearly and animate smoothly
+const MIN_AUDIO_TAP_MS = 165;
+const MIN_VISUAL_TAP_MS = 80;
 
 // Pre-fetch raw WAV bytes immediately on module load so decoding is instant
 let preloadedSampleBytesPromise: Promise<ArrayBuffer | null> | null = null;
@@ -80,7 +86,8 @@ function createReferenceSource({
   source.loopStart = REFERENCE_LOOP_START;
   source.detune.value = (midi - REFERENCE_ROOT_MIDI) * 100;
   source.connect(destination);
-  source.start(0);
+  const offset = Math.min(REFERENCE_START_OFFSET, Math.max(0, buffer.duration - 0.1));
+  source.start(0, offset);
 
   return source;
 }
@@ -105,6 +112,42 @@ function createFallbackSource({
   return oscillator;
 }
 
+function fadeOutAndStopVoice(
+  voice: Voice,
+  context: AudioContext | null,
+  fadeSeconds: number
+) {
+  if (context) {
+    const now = context.currentTime;
+    try {
+      voice.gain.gain.cancelScheduledValues(now);
+      voice.gain.gain.setValueAtTime(
+        Math.max(voice.gain.gain.value, 0.0001),
+        now
+      );
+      voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + fadeSeconds);
+    } catch {
+      // Ignore envelope scheduling errors
+    }
+  }
+
+  for (const source of voice.sources) {
+    try {
+      source.stop(context ? context.currentTime + fadeSeconds + 0.01 : 0);
+    } catch {
+      // Ignore already-stopped source
+    }
+  }
+
+  window.setTimeout(() => {
+    try {
+      voice.gain.disconnect();
+    } catch {
+      // Ignore disconnect races during teardown
+    }
+  }, Math.ceil((fadeSeconds + 0.05) * 1000));
+}
+
 export function useHarmoniumPlayer({
   octave,
   transpose,
@@ -127,6 +170,10 @@ export function useHarmoniumPlayer({
   const reverbConnectedRef = useRef(false);
   const voicesRef = useRef<Map<string, Voice>>(new Map());
   const requestedVoiceIdsRef = useRef<Set<string>>(new Set());
+  const physicallyHeldVoiceIdsRef = useRef<Set<string>>(new Set());
+  const voiceStartTimeRef = useRef<Map<string, number>>(new Map());
+  const pendingStopTimersRef = useRef<Map<string, number>>(new Map());
+  const pendingVisualTimersRef = useRef<Map<string, number>>(new Map());
   const sustainEnabledRef = useRef(false);
   const sustainedVoiceIdsRef = useRef<Set<string>>(new Set());
   const sampleBufferRef = useRef<AudioBuffer | null>(null);
@@ -232,45 +279,50 @@ export function useHarmoniumPlayer({
     [syncReverbRoute]
   );
 
-  // Create AudioContext and call resume() synchronously on user gesture
-  const ensureAudioSync = useCallback((): AudioContext | null => {
-    if (!audioContextRef.current) {
-      const AudioContextClass =
-        window.AudioContext ||
-        (window as Window & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
+  // Create AudioContext and pre-decode buffers; call resume() synchronously on user gesture
+  const ensureAudioSync = useCallback(
+    (resumeNow: boolean = true): AudioContext | null => {
+      if (!audioContextRef.current) {
+        const AudioContextClass =
+          window.AudioContext ||
+          (window as Window & { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
 
-      if (!AudioContextClass) {
-        return null;
+        if (!AudioContextClass) {
+          return null;
+        }
+
+        const context = new AudioContextClass();
+        const gainNode = context.createGain();
+        const reverbNode = context.createConvolver();
+
+        gainNode.gain.value = settingsRef.current.volume;
+        gainNode.connect(context.destination);
+        reverbNode.connect(context.destination);
+
+        audioContextRef.current = context;
+        gainNodeRef.current = gainNode;
+        reverbNodeRef.current = reverbNode;
+
+        void loadReferenceSample(context);
+        void loadReferenceReverb(context);
       }
 
-      const context = new AudioContextClass();
-      const gainNode = context.createGain();
-      const reverbNode = context.createConvolver();
+      if (resumeNow && audioContextRef.current.state === 'suspended') {
+        void audioContextRef.current.resume();
+      }
 
-      gainNode.gain.value = settingsRef.current.volume;
-      gainNode.connect(context.destination);
-      reverbNode.connect(context.destination);
+      return audioContextRef.current;
+    },
+    [loadReferenceReverb, loadReferenceSample]
+  );
 
-      audioContextRef.current = context;
-      gainNodeRef.current = gainNode;
-      reverbNodeRef.current = reverbNode;
-
-      void loadReferenceSample(context);
-      void loadReferenceReverb(context);
-    }
-
-    if (audioContextRef.current.state === 'suspended') {
-      void audioContextRef.current.resume();
-    }
-
-    return audioContextRef.current;
-  }, [loadReferenceReverb, loadReferenceSample]);
-
-  // Pre-decode sample buffer on mount so first key press is instant
+  // Pre-decode WAV sample buffer immediately on mount so the very first tap is 100% synchronous
   useEffect(() => {
+    ensureAudioSync(false);
+
     const unlock = () => {
-      ensureAudioSync();
+      ensureAudioSync(true);
     };
     window.addEventListener('pointerdown', unlock, { passive: true });
     window.addEventListener('touchstart', unlock, { passive: true });
@@ -282,56 +334,91 @@ export function useHarmoniumPlayer({
     };
   }, [ensureAudioSync]);
 
-  const stopNote = useCallback((noteId: string) => {
-    const context = audioContextRef.current;
-    const voice = voicesRef.current.get(noteId);
-    requestedVoiceIdsRef.current.delete(noteId);
-    setActiveNoteIds((current) => current.filter((id) => id !== noteId));
+  const releaseVoiceImmediate = useCallback((noteId: string) => {
+    const stopTimer = pendingStopTimersRef.current.get(noteId);
+    if (stopTimer !== undefined) {
+      window.clearTimeout(stopTimer);
+      pendingStopTimersRef.current.delete(noteId);
+    }
 
+    requestedVoiceIdsRef.current.delete(noteId);
+    sustainedVoiceIdsRef.current.delete(noteId);
+
+    const voice = voicesRef.current.get(noteId);
     if (!voice) {
       return;
     }
 
-    if (context) {
-      voice.gain.gain.cancelScheduledValues(context.currentTime);
-      voice.gain.gain.setValueAtTime(
-        Math.max(voice.gain.gain.value, 0.0001),
-        context.currentTime
-      );
-      voice.gain.gain.exponentialRampToValueAtTime(
-        0.0001,
-        context.currentTime + 0.03
-      );
-    }
-
-    for (const source of voice.sources) {
-      try {
-        source.stop(context ? context.currentTime + 0.04 : 0);
-      } catch (error) {
-        console.error('Failed to stop harmonium note', error);
-      }
-    }
-
     voicesRef.current.delete(noteId);
-    sustainedVoiceIdsRef.current.delete(noteId);
-
-    window.setTimeout(() => {
-      try {
-        voice.gain.disconnect();
-      } catch {
-        // Ignore disconnect races during teardown.
-      }
-    }, 120);
+    fadeOutAndStopVoice(voice, audioContextRef.current, 0.065);
   }, []);
 
+  const stopNote = useCallback(
+    (noteId: string) => {
+      physicallyHeldVoiceIdsRef.current.delete(noteId);
+
+      const startTime = voiceStartTimeRef.current.get(noteId) ?? 0;
+      const elapsed = performance.now() - startTime;
+
+      // Keep visual key-down animation visible for at least MIN_VISUAL_TAP_MS on quick taps
+      const existingVisualTimer = pendingVisualTimersRef.current.get(noteId);
+      if (existingVisualTimer !== undefined) {
+        window.clearTimeout(existingVisualTimer);
+        pendingVisualTimersRef.current.delete(noteId);
+      }
+      if (elapsed < MIN_VISUAL_TAP_MS) {
+        const vTimer = window.setTimeout(() => {
+          pendingVisualTimersRef.current.delete(noteId);
+          if (!physicallyHeldVoiceIdsRef.current.has(noteId)) {
+            setActiveNoteIds((current) => current.filter((id) => id !== noteId));
+          }
+        }, MIN_VISUAL_TAP_MS - elapsed);
+        pendingVisualTimersRef.current.set(noteId, vTimer);
+      } else {
+        setActiveNoteIds((current) => current.filter((id) => id !== noteId));
+      }
+
+      // Keep audio reed speaking for at least MIN_AUDIO_TAP_MS on quick taps
+      const existingStopTimer = pendingStopTimersRef.current.get(noteId);
+      if (existingStopTimer !== undefined) {
+        window.clearTimeout(existingStopTimer);
+        pendingStopTimersRef.current.delete(noteId);
+      }
+      if (elapsed < MIN_AUDIO_TAP_MS) {
+        const aTimer = window.setTimeout(() => {
+          pendingStopTimersRef.current.delete(noteId);
+          if (!physicallyHeldVoiceIdsRef.current.has(noteId)) {
+            releaseVoiceImmediate(noteId);
+          }
+        }, MIN_AUDIO_TAP_MS - elapsed);
+        pendingStopTimersRef.current.set(noteId, aTimer);
+        return;
+      }
+
+      releaseVoiceImmediate(noteId);
+    },
+    [releaseVoiceImmediate]
+  );
+
   const stopAllNotes = useCallback(() => {
+    for (const timer of pendingStopTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    pendingStopTimersRef.current.clear();
+
+    for (const timer of pendingVisualTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    pendingVisualTimersRef.current.clear();
+
+    physicallyHeldVoiceIdsRef.current.clear();
     requestedVoiceIdsRef.current.clear();
     for (const noteId of [...voicesRef.current.keys()]) {
-      stopNote(noteId);
+      releaseVoiceImmediate(noteId);
     }
     sustainedVoiceIdsRef.current.clear();
     setActiveNoteIds([]);
-  }, [stopNote]);
+  }, [releaseVoiceImmediate]);
 
   const setMidiSustain = useCallback(
     (enabled: boolean) => {
@@ -349,46 +436,35 @@ export function useHarmoniumPlayer({
     [stopNote]
   );
 
-  const startVoice = useCallback(
-    async ({
+  const attachAndStartSources = useCallback(
+    ({
       voiceId,
       desiredMidi,
-      velocity = 1,
+      velocity,
+      context,
+      gainNode,
+      sampleBuffer,
     }: {
       voiceId: string;
       desiredMidi: number;
-      velocity?: number;
+      velocity: number;
+      context: AudioContext;
+      gainNode: GainNode;
+      sampleBuffer: AudioBuffer | null;
     }) => {
-      requestedVoiceIdsRef.current.add(voiceId);
-      sustainedVoiceIdsRef.current.delete(voiceId);
-
-      if (voicesRef.current.has(voiceId)) {
-        return;
+      // If another voice is still playing for this voiceId (e.g. rapid double-tap),
+      // smoothly cross-fade it out so the new tap articulates cleanly
+      const existingVoice = voicesRef.current.get(voiceId);
+      if (existingVoice) {
+        fadeOutAndStopVoice(existingVoice, context, 0.014);
+        voicesRef.current.delete(voiceId);
       }
-
-      // Synchronously create and resume AudioContext inside user gesture before any await
-      const context = ensureAudioSync();
-      const gainNode = gainNodeRef.current;
-      if (!context || !gainNode) {
-        return;
-      }
-
-      void loadReferenceReverb(context);
 
       const voiceGain = context.createGain();
-      voiceGain.gain.value = velocity;
+      const now = context.currentTime;
+      voiceGain.gain.setValueAtTime(0.0001, now);
+      voiceGain.gain.linearRampToValueAtTime(velocity, now + 0.008);
       voiceGain.connect(gainNode);
-
-      const sampleBuffer =
-        sampleBufferRef.current ?? (await loadReferenceSample(context));
-
-      if (
-        voicesRef.current.has(voiceId) ||
-        !requestedVoiceIdsRef.current.has(voiceId)
-      ) {
-        voiceGain.disconnect();
-        return;
-      }
 
       const sources: AudioScheduledSourceNode[] = [];
 
@@ -453,14 +529,89 @@ export function useHarmoniumPlayer({
         sources,
       });
     },
-    [ensureAudioSync, loadReferenceReverb, loadReferenceSample]
+    []
+  );
+
+  const startVoice = useCallback(
+    async ({
+      voiceId,
+      desiredMidi,
+      velocity = 1,
+    }: {
+      voiceId: string;
+      desiredMidi: number;
+      velocity?: number;
+    }) => {
+      // Cancel any pending stop/visual timer from a previous tap on this note
+      const pendingStop = pendingStopTimersRef.current.get(voiceId);
+      if (pendingStop !== undefined) {
+        window.clearTimeout(pendingStop);
+        pendingStopTimersRef.current.delete(voiceId);
+      }
+      const pendingVisual = pendingVisualTimersRef.current.get(voiceId);
+      if (pendingVisual !== undefined) {
+        window.clearTimeout(pendingVisual);
+        pendingVisualTimersRef.current.delete(voiceId);
+      }
+
+      physicallyHeldVoiceIdsRef.current.add(voiceId);
+      requestedVoiceIdsRef.current.add(voiceId);
+      sustainedVoiceIdsRef.current.delete(voiceId);
+      voiceStartTimeRef.current.set(voiceId, performance.now());
+
+      // Synchronously create and resume AudioContext inside user gesture
+      const context = ensureAudioSync(true);
+      const gainNode = gainNodeRef.current;
+      if (!context || !gainNode) {
+        return;
+      }
+
+      void loadReferenceReverb(context);
+
+      // Fast path: if sampleBufferRef.current is already decoded, start synchronously with zero await!
+      if (sampleBufferRef.current) {
+        attachAndStartSources({
+          voiceId,
+          desiredMidi,
+          velocity,
+          context,
+          gainNode,
+          sampleBuffer: sampleBufferRef.current,
+        });
+        return;
+      }
+
+      const sampleBuffer = await loadReferenceSample(context);
+      if (!requestedVoiceIdsRef.current.has(voiceId)) {
+        return;
+      }
+
+      attachAndStartSources({
+        voiceId,
+        desiredMidi,
+        velocity,
+        context,
+        gainNode,
+        sampleBuffer,
+      });
+    },
+    [attachAndStartSources, ensureAudioSync, loadReferenceReverb, loadReferenceSample]
   );
 
   const startNote = useCallback(
     async (note: NoteKey) => {
-      setActiveNoteIds((current) =>
-        current.includes(note.id) ? current : [...current, note.id]
-      );
+      setActiveNoteIds((current) => {
+        if (current.includes(note.id)) {
+          // Briefly release for 1 frame so rapid double-taps visibly slide down again
+          window.requestAnimationFrame(() => {
+            setActiveNoteIds((next) =>
+              next.includes(note.id) ? next : [...next, note.id]
+            );
+          });
+          return current.filter((id) => id !== note.id);
+        }
+        return [...current, note.id];
+      });
       await startVoice({
         voiceId: note.id,
         desiredMidi:

@@ -460,11 +460,17 @@ export function ImmersiveHarmonium() {
     []
   );
 
-  // Unified Multi-Touch & Pointer tracking (each finger has its own pointerId)
-  const pointerNotesRef = useRef<Map<number, string>>(new Map());
+  // Unified Multi-Touch & Pointer tracking (each finger/pointer has its own key in the map)
+  const pointerNotesRef = useRef<Map<string, string>>(new Map());
+  const usingTouchEventsRef = useRef(false);
 
   const resolveNoteIdAtPoint = useCallback(
-    (clientX: number, clientY: number): string | null => {
+    (clientX: number, clientY: number, target?: EventTarget | null): string | null => {
+      const targetEl = (target as HTMLElement | null)?.closest?.('[data-note-id]');
+      if (targetEl) {
+        const id = targetEl.getAttribute('data-note-id');
+        if (id) return id;
+      }
       const el = document.elementFromPoint(clientX, clientY);
       if (!el) return null;
       const keyEl = el.closest('[data-note-id]') as HTMLElement | null;
@@ -474,21 +480,21 @@ export function ImmersiveHarmonium() {
   );
 
   const updatePointerNote = useCallback(
-    (pointerId: number, nextNoteId: string | null) => {
-      const prevNoteId = pointerNotesRef.current.get(pointerId) ?? null;
-      if (prevNoteId === nextNoteId) return;
+    (pointerKey: string, nextNoteId: string | null, forceRetrigger: boolean = false) => {
+      const prevNoteId = pointerNotesRef.current.get(pointerKey) ?? null;
+      if (prevNoteId === nextNoteId && !forceRetrigger) return;
 
       if (nextNoteId) {
-        pointerNotesRef.current.set(pointerId, nextNoteId);
+        pointerNotesRef.current.set(pointerKey, nextNoteId);
         const note = noteById.get(nextNoteId);
         if (note) {
           startNote(note);
         }
       } else {
-        pointerNotesRef.current.delete(pointerId);
+        pointerNotesRef.current.delete(pointerKey);
       }
 
-      if (prevNoteId) {
+      if (prevNoteId && prevNoteId !== nextNoteId) {
         const stillHeldByAnotherFinger = Array.from(
           pointerNotesRef.current.values()
         ).includes(prevNoteId);
@@ -500,36 +506,92 @@ export function ImmersiveHarmonium() {
     [noteById, startNote, stopNote]
   );
 
+  // Hardware multi-touch handlers (tracks every finger simultaneously via touch.identifier)
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      usingTouchEventsRef.current = true;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        const noteId = resolveNoteIdAtPoint(
+          touch.clientX,
+          touch.clientY,
+          touch.target
+        );
+        updatePointerNote(`touch-${touch.identifier}`, noteId, true);
+      }
+    },
+    [resolveNoteIdAtPoint, updatePointerNote]
+  );
+
+  const handleTouchMove = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      usingTouchEventsRef.current = true;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        const noteId = resolveNoteIdAtPoint(touch.clientX, touch.clientY);
+        updatePointerNote(`touch-${touch.identifier}`, noteId, false);
+      }
+    },
+    [resolveNoteIdAtPoint, updatePointerNote]
+  );
+
+  const handleTouchEndOrCancel = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      usingTouchEventsRef.current = true;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        updatePointerNote(`touch-${touch.identifier}`, null, false);
+      }
+
+      // Reconcile any orphaned touch entries against remaining active touches
+      const remainingTouchKeys = new Set<string>();
+      for (let i = 0; i < e.touches.length; i++) {
+        remainingTouchKeys.add(`touch-${e.touches[i].identifier}`);
+      }
+      for (const key of Array.from(pointerNotesRef.current.keys())) {
+        if (key.startsWith('touch-') && !remainingTouchKeys.has(key)) {
+          updatePointerNote(key, null, false);
+        }
+      }
+    },
+    [updatePointerNote]
+  );
+
+  // Pointer handlers for mouse, stylus, or synthetic pointer environments
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // Ignore capture errors
+      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+      if (e.pointerType === 'mouse') {
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore capture errors
+        }
       }
-      const noteId =
-        (e.target as HTMLElement | null)
-          ?.closest('[data-note-id]')
-          ?.getAttribute('data-note-id') ??
-        resolveNoteIdAtPoint(e.clientX, e.clientY) ??
-        null;
-      updatePointerNote(e.pointerId, noteId);
+
+      const noteId = resolveNoteIdAtPoint(e.clientX, e.clientY, e.target);
+      updatePointerNote(`ptr-${e.pointerId}`, noteId, true);
     },
     [resolveNoteIdAtPoint, updatePointerNote]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!pointerNotesRef.current.has(e.pointerId)) return;
+      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      const key = `ptr-${e.pointerId}`;
+      if (!pointerNotesRef.current.has(key)) return;
       const noteId = resolveNoteIdAtPoint(e.clientX, e.clientY);
-      updatePointerNote(e.pointerId, noteId);
+      updatePointerNote(key, noteId, false);
     },
     [resolveNoteIdAtPoint, updatePointerNote]
   );
 
   const handlePointerUpOrCancel = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      updatePointerNote(e.pointerId, null);
+      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      updatePointerNote(`ptr-${e.pointerId}`, null, false);
     },
     [updatePointerNote]
   );
@@ -730,10 +792,15 @@ export function ImmersiveHarmonium() {
               paddingBottom: 14,
               touchAction: 'none',
             }}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEndOrCancel}
+            onTouchCancel={handleTouchEndOrCancel}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUpOrCancel}
             onPointerCancel={handlePointerUpOrCancel}
+            onLostPointerCapture={handlePointerUpOrCancel}
           >
             <div
               className="relative flex-1 h-full w-full"
@@ -744,18 +811,13 @@ export function ImmersiveHarmonium() {
                 const w = 100 / whiteKeys.length;
                 const isActive = activeNoteIds.includes(note.id);
                 return (
-                  <button
+                  <div
                     key={note.id}
-                    type="button"
+                    role="button"
+                    tabIndex={-1}
                     data-note-id={note.id}
                     aria-label={`${note.sargam} (${note.western})`}
-                    onClick={() => {
-                      if (pointerNotesRef.current.size === 0) {
-                        startNote(note);
-                        window.setTimeout(() => stopNote(note.id), 250);
-                      }
-                    }}
-                    className="flex flex-col justify-between rounded-b-[1.35rem] border-x border-t border-black/15 px-2.5 pt-4 pb-3.5 text-left select-none"
+                    className="flex flex-col justify-between rounded-b-[1.35rem] border-x border-t border-black/15 px-2.5 pt-4 pb-3.5 text-left select-none cursor-pointer"
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -821,7 +883,7 @@ export function ImmersiveHarmonium() {
                     >
                       {note.keycap}
                     </span>
-                  </button>
+                  </div>
                 );
               })}
 
@@ -832,18 +894,13 @@ export function ImmersiveHarmonium() {
                 const left = (note.whiteIndex + 1) * ww - bw / 2;
                 const isActive = activeNoteIds.includes(note.id);
                 return (
-                  <button
+                  <div
                     key={note.id}
-                    type="button"
+                    role="button"
+                    tabIndex={-1}
                     data-note-id={note.id}
                     aria-label={`${note.sargam} (${note.western})`}
-                    onClick={() => {
-                      if (pointerNotesRef.current.size === 0) {
-                        startNote(note);
-                        window.setTimeout(() => stopNote(note.id), 250);
-                      }
-                    }}
-                    className="absolute top-0 z-10 flex h-[59%] flex-col justify-between rounded-b-[1.05rem] border-x border-t border-black/30 px-2 pt-3 pb-2.5 text-left select-none"
+                    className="absolute top-0 z-10 flex h-[59%] flex-col justify-between rounded-b-[1.05rem] border-x border-t border-black/30 px-2 pt-3 pb-2.5 text-left select-none cursor-pointer"
                     style={{
                       left: `${left}%`,
                       width: `${bw}%`,
@@ -910,7 +967,7 @@ export function ImmersiveHarmonium() {
                     >
                       {note.keycap}
                     </span>
-                  </button>
+                  </div>
                 );
               })}
             </div>
