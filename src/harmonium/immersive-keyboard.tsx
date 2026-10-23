@@ -127,7 +127,7 @@ function playTablaStroke(
 }
 
 export function ImmersiveHarmonium() {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const [labelMode, setLabelMode] = useState<'western' | 'sargam' | 'none'>('sargam');
   const [sargamOffset, setSargamOffset] = useState<number>(0); // 0 = C is Sa
@@ -708,16 +708,16 @@ export function ImmersiveHarmonium() {
           <SideWood side="left" />
           <SideWood side="right" />
 
-          {/* Key-frame top rail */}
+          {/* Key-frame top rail + shadow well */}
           <div
-            className="pointer-events-none"
+            className="pointer-events-none relative z-20"
             style={{
-              height: 8,
-              marginLeft: 20,
-              marginRight: 20,
-              background: 'linear-gradient(180deg,#5a3010 0%,#3a1a08 100%)',
-              borderBottom: '2px solid rgba(0,0,0,.6)',
-              boxShadow: '0 4px 12px rgba(0,0,0,.5)',
+              height: 10,
+              marginLeft: 8,
+              marginRight: 8,
+              background: 'linear-gradient(180deg,#5a3010 0%,#2a1204 100%)',
+              borderBottom: '2px solid rgba(0,0,0,.75)',
+              boxShadow: '0 6px 14px rgba(0,0,0,.65)',
             }}
           />
 
@@ -725,9 +725,9 @@ export function ImmersiveHarmonium() {
           <div
             className="relative flex flex-1 overflow-hidden"
             style={{
-              paddingLeft: 20,
-              paddingRight: 20,
-              paddingBottom: 6,
+              paddingLeft: 8,
+              paddingRight: 8,
+              paddingBottom: 14,
               touchAction: 'none',
             }}
             onPointerDown={handlePointerDown}
@@ -755,36 +755,40 @@ export function ImmersiveHarmonium() {
                         window.setTimeout(() => stopNote(note.id), 250);
                       }
                     }}
-                    className="flex flex-col justify-between rounded-b-[1.2rem] border border-black/8 px-2 pt-4 pb-3 text-left select-none"
+                    className="flex flex-col justify-between rounded-b-[1.35rem] border-x border-t border-black/15 px-2.5 pt-4 pb-3.5 text-left select-none"
                     style={{
                       position: 'absolute',
                       top: 0,
-                      bottom: 0,
-                      left: `calc(${note.whiteIndex * w}% + 1px)`,
-                      width: `calc(${w}% - 2px)`,
+                      bottom: 12,
+                      left: `calc(${note.whiteIndex * w}% + 0.5px)`,
+                      width: `calc(${w}% - 1px)`,
                       background: isActive
-                        ? '#f6d2aa'
-                        : 'linear-gradient(180deg,#fffdfa 0%,#efe3d5 100%)',
+                        ? 'linear-gradient(180deg,#e9c090 0%,#f6d2aa 35%,#e5b582 100%)'
+                        : 'linear-gradient(180deg,#fffdfa 0%,#f7efe4 72%,#eadbc9 100%)',
+                      borderBottom: isActive
+                        ? '4px solid #9c7248'
+                        : '10px solid #cbb59b',
                       boxShadow: isActive
-                        ? 'inset 0 -6px 18px rgba(183,124,74,0.22), 0 0 12px rgba(251,191,36,0.25)'
-                        : 'inset 0 -10px 24px rgba(183,124,74,0.10)',
-                      transform: isActive ? 'translateY(5px)' : 'translateY(0)',
-                      transition:
-                        'transform .06s ease-out, background .05s, box-shadow .05s',
+                        ? 'inset 0 12px 20px rgba(60,25,5,0.35), inset 0 -6px 18px rgba(183,124,74,0.28), 0 2px 6px rgba(0,0,0,0.45), 0 0 14px rgba(251,191,36,0.28)'
+                        : 'inset 0 -10px 24px rgba(183,124,74,0.12), 0 10px 18px rgba(0,0,0,0.45)',
+                      transform: isActive ? 'translateY(12px)' : 'translateY(0px)',
+                      transition: isActive
+                        ? 'transform .045s cubic-bezier(0.16, 1, 0.3, 1), background .04s, box-shadow .04s, border-bottom-width .04s'
+                        : 'transform .14s cubic-bezier(0.22, 1, 0.36, 1), background .08s, box-shadow .08s, border-bottom-width .08s',
                       touchAction: 'none',
                     }}
                   >
                     {suggestedKeys.has(note.id) && !isActive && (
-                      <div className="pointer-events-none absolute bottom-12 left-1/2 -translate-x-1/2 w-[22px] h-[22px] rounded-full bg-amber-400/60 blur-[5px] shadow-[0_0_18px_rgba(251,191,36,0.9)]" />
+                      <div className="pointer-events-none absolute bottom-14 left-1/2 -translate-x-1/2 w-[24px] h-[24px] rounded-full bg-amber-400/60 blur-[5px] shadow-[0_0_18px_rgba(251,191,36,0.9)]" />
                     )}
 
                     {labelMode !== 'none' && (
-                      <div className="pointer-events-none mt-auto flex flex-col items-center">
+                      <div className="pointer-events-none mt-auto flex flex-col items-center mb-1">
                         <span
                           style={{
-                            fontSize: 13,
+                            fontSize: 'clamp(14px, 1.35vw, 18px)',
                             fontWeight: 700,
-                            color: isActive ? '#7c3a10' : '#1e293b',
+                            color: isActive ? '#6b2f0a' : '#1e293b',
                           }}
                         >
                           {labelMode === 'western'
@@ -801,17 +805,17 @@ export function ImmersiveHarmonium() {
                         alignItems: 'center',
                         justifyContent: 'center',
                         borderRadius: 999,
-                        padding: '3px 7px',
+                        padding: '3px 8px',
                         background: isActive
-                          ? 'rgba(124,58,16,0.18)'
+                          ? 'rgba(124,58,16,0.22)'
                           : 'rgba(15,23,42,0.07)',
-                        fontSize: 'clamp(8px,0.9vw,12px)',
+                        fontSize: 'clamp(9px,0.95vw,12px)',
                         fontWeight: 600,
-                        color: isActive ? '#7c3a10' : '#475569',
+                        color: isActive ? '#6b2f0a' : '#475569',
                         letterSpacing: '0.04em',
                         alignSelf: 'flex-start',
                         border: isActive
-                          ? '1px solid rgba(124,58,16,0.2)'
+                          ? '1px solid rgba(124,58,16,0.25)'
                           : '1px solid rgba(0,0,0,0.06)',
                       }}
                     >
@@ -824,7 +828,7 @@ export function ImmersiveHarmonium() {
               {/* Black keys */}
               {blackKeys.map((note) => {
                 const ww = 100 / whiteKeys.length;
-                const bw = ww * 0.58;
+                const bw = ww * 0.65;
                 const left = (note.whiteIndex + 1) * ww - bw / 2;
                 const isActive = activeNoteIds.includes(note.id);
                 return (
@@ -839,19 +843,23 @@ export function ImmersiveHarmonium() {
                         window.setTimeout(() => stopNote(note.id), 250);
                       }
                     }}
-                    className="absolute top-0 z-10 flex h-[58%] flex-col justify-between rounded-b-[1rem] border border-black/10 px-1.5 pt-3 pb-2 text-left select-none"
+                    className="absolute top-0 z-10 flex h-[59%] flex-col justify-between rounded-b-[1.05rem] border-x border-t border-black/30 px-2 pt-3 pb-2.5 text-left select-none"
                     style={{
                       left: `${left}%`,
                       width: `${bw}%`,
                       background: isActive
-                        ? 'linear-gradient(180deg,#16655e 0%,#0e3f3b 100%)'
-                        : 'linear-gradient(180deg,#334155 0%,#111827 100%)',
+                        ? 'linear-gradient(180deg,#115e59 0%,#16655e 45%,#0d3b38 100%)'
+                        : 'linear-gradient(180deg,#334155 0%,#1e293b 65%,#0f172a 100%)',
+                      borderBottom: isActive
+                        ? '3px solid #062c28'
+                        : '9px solid #090d16',
                       boxShadow: isActive
-                        ? '0 0 18px rgba(52,211,153,.4), 0 14px 30px rgba(15,23,42,0.28)'
-                        : '0 14px 30px rgba(15,23,42,0.28)',
-                      transform: isActive ? 'translateY(4px)' : 'translateY(0)',
-                      transition:
-                        'transform .06s ease-out, background .05s, box-shadow .05s',
+                        ? 'inset 0 8px 14px rgba(0,0,0,0.45), 0 0 18px rgba(52,211,153,.45), 0 5px 12px rgba(15,23,42,0.45)'
+                        : '0 16px 28px rgba(15,23,42,0.48), inset 0 1px 1px rgba(255,255,255,0.16)',
+                      transform: isActive ? 'translateY(9px)' : 'translateY(0px)',
+                      transition: isActive
+                        ? 'transform .04s cubic-bezier(0.16, 1, 0.3, 1), background .04s, box-shadow .04s, border-bottom-width .04s'
+                        : 'transform .12s cubic-bezier(0.22, 1, 0.36, 1), background .08s, box-shadow .08s, border-bottom-width .08s',
                       touchAction: 'none',
                     }}
                   >
@@ -860,14 +868,14 @@ export function ImmersiveHarmonium() {
                     )}
 
                     {labelMode !== 'none' && (
-                      <div className="pointer-events-none mt-auto flex flex-col items-center">
+                      <div className="pointer-events-none mt-auto flex flex-col items-center mb-0.5">
                         <span
                           style={{
-                            fontSize: 11,
+                            fontSize: 'clamp(11px, 1.05vw, 14px)',
                             fontWeight: 700,
                             color: isActive
                               ? '#6ee7b7'
-                              : 'rgba(255,255,255,0.9)',
+                              : 'rgba(255,255,255,0.92)',
                           }}
                         >
                           {labelMode === 'western'
@@ -888,7 +896,7 @@ export function ImmersiveHarmonium() {
                         background: isActive
                           ? 'rgba(52,211,153,0.18)'
                           : 'rgba(255,255,255,0.1)',
-                        fontSize: 'clamp(7px,0.8vw,10px)',
+                        fontSize: 'clamp(8px,0.85vw,11px)',
                         fontWeight: 600,
                         color: isActive
                           ? '#6ee7b7'
@@ -913,7 +921,7 @@ export function ImmersiveHarmonium() {
         <div
           className="relative z-10 flex-shrink-0 pointer-events-none"
           style={{
-            height: 24,
+            height: 22,
             background:
               'linear-gradient(180deg,#3a1a08 0%,#5c2e0e 60%,#7c4520 100%)',
             boxShadow: '0 -6px 24px rgba(0,0,0,.7)',
@@ -934,14 +942,15 @@ export function ImmersiveHarmonium() {
         </div>
       </div>
 
-      {/* ══ RIGHT SIDE OPTION BAR (DOCKED) ══════════════════════════════ */}
+      {/* ══ RIGHT SIDE OPTION BAR (SLIDE-OVER DRAWER SO KEYS STAY WIDE) ══ */}
       {sidebarOpen && (
         <aside
-          className="relative z-30 flex h-full flex-col gap-3 overflow-y-auto border-l border-amber-500/20 p-3.5"
+          className="absolute right-0 top-[52px] bottom-[22px] z-40 flex flex-col gap-3 overflow-y-auto border-l border-amber-500/25 p-3.5"
           style={{
-            width: 265,
+            width: 272,
             background: 'rgba(12,6,1,.96)',
-            boxShadow: '-8px 0 32px rgba(0,0,0,0.75)',
+            backdropFilter: 'blur(16px)',
+            boxShadow: '-12px 0 36px rgba(0,0,0,0.85)',
             touchAction: 'pan-y',
           }}
         >
@@ -1297,7 +1306,7 @@ function SideWood({ side }: { side: 'left' | 'right' }) {
         top: 0,
         bottom: 0,
         [side]: 0,
-        width: 20,
+        width: 8,
         zIndex: 20,
         background:
           side === 'left'
