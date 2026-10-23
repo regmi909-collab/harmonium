@@ -1,0 +1,6 @@
+{
+  "name": "SargamPad — Nepali Folk & Raga Harmonium",
+  "description": "Low-latency touch harmonium designed for Lenovo Pad screens with Nepali folk Sarangi resonance, Raga scale guides, Tanpura drone, and Madal/Tabla rhythm accompaniment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
