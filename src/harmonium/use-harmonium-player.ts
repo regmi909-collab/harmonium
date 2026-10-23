@@ -8,39 +8,53 @@ type Voice = {
 };
 
 type PlaybackMode = 'samples' | 'oscillator';
-type ReedMode = 'single' | 'double';
+export type ReedMode = 'single' | 'double';
 
 const REFERENCE_SAMPLE_URL = '/harmonium-kannan-orig.wav';
 const REFERENCE_REVERB_URL = '/reverb.wav';
 const REFERENCE_ROOT_MIDI = 62;
 const REFERENCE_LOOP_START = 0.5;
 
-let rawSampleBytesPromise: Promise<ArrayBuffer | null> | null = null;
+// Pre-fetch raw WAV bytes immediately on module load so decoding is instant
+let preloadedSampleBytesPromise: Promise<ArrayBuffer | null> | null = null;
+let preloadedReverbBytesPromise: Promise<ArrayBuffer | null> | null = null;
 
-function preloadRawSampleBytes(): Promise<ArrayBuffer | null> {
-  if (!rawSampleBytesPromise && typeof window !== 'undefined') {
-    rawSampleBytesPromise = fetch(REFERENCE_SAMPLE_URL, { cache: 'force-cache' })
-      .then((res) => (res.ok ? res.arrayBuffer() : null))
+function getSampleBytes(): Promise<ArrayBuffer | null> {
+  if (!preloadedSampleBytesPromise && typeof window !== 'undefined') {
+    preloadedSampleBytesPromise = fetch(REFERENCE_SAMPLE_URL, { cache: 'force-cache' })
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
       .catch(() => null);
   }
-  return rawSampleBytesPromise ?? Promise.resolve(null);
+  return preloadedSampleBytesPromise ?? Promise.resolve(null);
 }
 
-// Start preloading sample bytes immediately in browser
+function getReverbBytes(): Promise<ArrayBuffer | null> {
+  if (!preloadedReverbBytesPromise && typeof window !== 'undefined') {
+    preloadedReverbBytesPromise = fetch(REFERENCE_REVERB_URL, { cache: 'force-cache' })
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .catch(() => null);
+  }
+  return preloadedReverbBytesPromise ?? Promise.resolve(null);
+}
+
 if (typeof window !== 'undefined') {
-  void preloadRawSampleBytes();
+  void getSampleBytes();
+  void getReverbBytes();
 }
 
 async function fetchAudioBuffer(context: AudioContext, url: string) {
-  if (url === REFERENCE_SAMPLE_URL) {
-    const raw = await preloadRawSampleBytes();
-    if (raw) {
-      return context.decodeAudioData(raw.slice(0));
-    }
+  const rawBytes =
+    url === REFERENCE_SAMPLE_URL
+      ? await getSampleBytes()
+      : url === REFERENCE_REVERB_URL
+      ? await getReverbBytes()
+      : null;
+
+  if (rawBytes) {
+    return context.decodeAudioData(rawBytes.slice(0));
   }
 
   const response = await fetch(url, { cache: 'force-cache' }).catch(() => null);
-
   if (!response?.ok) {
     return null;
   }
@@ -143,8 +157,8 @@ export function useHarmoniumPlayer({
     if (!enabled && reverbConnectedRef.current) {
       try {
         gainNode.disconnect(reverbNode);
-      } catch {
-        // Ignore disconnect errors
+      } catch (error) {
+        console.error('Failed to disconnect harmonium reverb', error);
       }
       reverbConnectedRef.current = false;
     }
@@ -169,45 +183,6 @@ export function useHarmoniumPlayer({
     syncReverbRoute(reverbEnabled);
   }, [octave, transpose, volume, reverbEnabled, reedMode, syncReverbRoute]);
 
-  const ensureAudio = useCallback(async () => {
-    if (!audioContextRef.current) {
-      const AudioContextClass =
-        window.AudioContext ||
-        (window as Window & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-
-      if (!AudioContextClass) {
-        return null;
-      }
-
-      const context = new AudioContextClass({ latencyHint: 'interactive' });
-      const compressor = context.createDynamicsCompressor();
-      compressor.threshold.value = -14;
-      compressor.knee.value = 18;
-      compressor.ratio.value = 4;
-      compressor.attack.value = 0.003;
-      compressor.release.value = 0.15;
-
-      const gainNode = context.createGain();
-      const reverbNode = context.createConvolver();
-
-      gainNode.gain.value = settingsRef.current.volume;
-      gainNode.connect(compressor);
-      reverbNode.connect(compressor);
-      compressor.connect(context.destination);
-
-      audioContextRef.current = context;
-      gainNodeRef.current = gainNode;
-      reverbNodeRef.current = reverbNode;
-    }
-
-    if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume();
-    }
-
-    return audioContextRef.current;
-  }, []);
-
   const loadReferenceSample = useCallback(async (context: AudioContext) => {
     if (sampleBufferRef.current) {
       return sampleBufferRef.current;
@@ -221,7 +196,11 @@ export function useHarmoniumPlayer({
           sampleBufferRef.current = buf;
           return buf;
         })
-        .catch(() => null);
+        .catch((error) => {
+          console.error('Failed to load harmonium reference sample', error);
+          sampleBufferPromiseRef.current = null;
+          return null;
+        });
     }
 
     return sampleBufferPromiseRef.current;
@@ -233,7 +212,11 @@ export function useHarmoniumPlayer({
         reverbBufferPromiseRef.current = fetchAudioBuffer(
           context,
           REFERENCE_REVERB_URL
-        ).catch(() => null);
+        ).catch((error) => {
+          console.error('Failed to load harmonium reverb response', error);
+          reverbBufferPromiseRef.current = null;
+          return null;
+        });
       }
 
       const buffer = await reverbBufferPromiseRef.current;
@@ -249,13 +232,61 @@ export function useHarmoniumPlayer({
     [syncReverbRoute]
   );
 
+  // Create AudioContext and call resume() synchronously on user gesture
+  const ensureAudioSync = useCallback((): AudioContext | null => {
+    if (!audioContextRef.current) {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as Window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+
+      if (!AudioContextClass) {
+        return null;
+      }
+
+      const context = new AudioContextClass();
+      const gainNode = context.createGain();
+      const reverbNode = context.createConvolver();
+
+      gainNode.gain.value = settingsRef.current.volume;
+      gainNode.connect(context.destination);
+      reverbNode.connect(context.destination);
+
+      audioContextRef.current = context;
+      gainNodeRef.current = gainNode;
+      reverbNodeRef.current = reverbNode;
+
+      void loadReferenceSample(context);
+      void loadReferenceReverb(context);
+    }
+
+    if (audioContextRef.current.state === 'suspended') {
+      void audioContextRef.current.resume();
+    }
+
+    return audioContextRef.current;
+  }, [loadReferenceReverb, loadReferenceSample]);
+
+  // Pre-decode sample buffer on mount so first key press is instant
+  useEffect(() => {
+    const unlock = () => {
+      ensureAudioSync();
+    };
+    window.addEventListener('pointerdown', unlock, { passive: true });
+    window.addEventListener('touchstart', unlock, { passive: true });
+    window.addEventListener('keydown', unlock, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('touchstart', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, [ensureAudioSync]);
+
   const stopNote = useCallback((noteId: string) => {
     const context = audioContextRef.current;
     const voice = voicesRef.current.get(noteId);
     requestedVoiceIdsRef.current.delete(noteId);
-    setActiveNoteIds((current) =>
-      current.includes(noteId) ? current.filter((id) => id !== noteId) : current
-    );
+    setActiveNoteIds((current) => current.filter((id) => id !== noteId));
 
     if (!voice) {
       return;
@@ -269,15 +300,15 @@ export function useHarmoniumPlayer({
       );
       voice.gain.gain.exponentialRampToValueAtTime(
         0.0001,
-        context.currentTime + 0.035
+        context.currentTime + 0.03
       );
     }
 
     for (const source of voice.sources) {
       try {
-        source.stop(context ? context.currentTime + 0.045 : 0);
-      } catch {
-        // Ignore stop errors
+        source.stop(context ? context.currentTime + 0.04 : 0);
+      } catch (error) {
+        console.error('Failed to stop harmonium note', error);
       }
     }
 
@@ -290,7 +321,7 @@ export function useHarmoniumPlayer({
       } catch {
         // Ignore disconnect races during teardown.
       }
-    }, 100);
+    }, 120);
   }, []);
 
   const stopAllNotes = useCallback(() => {
@@ -335,7 +366,8 @@ export function useHarmoniumPlayer({
         return;
       }
 
-      const context = await ensureAudio();
+      // Synchronously create and resume AudioContext inside user gesture before any await
+      const context = ensureAudioSync();
       const gainNode = gainNodeRef.current;
       if (!context || !gainNode) {
         return;
@@ -371,14 +403,11 @@ export function useHarmoniumPlayer({
         );
 
         if (settingsRef.current.reedMode === 'double') {
-          const octaveGain = context.createGain();
-          octaveGain.gain.value = 0.45;
-          octaveGain.connect(voiceGain);
           sources.push(
             createReferenceSource({
               buffer: sampleBuffer,
               context,
-              destination: octaveGain,
+              destination: voiceGain,
               midi: desiredMidi + 12,
             })
           );
@@ -424,7 +453,7 @@ export function useHarmoniumPlayer({
         sources,
       });
     },
-    [ensureAudio, loadReferenceReverb, loadReferenceSample]
+    [ensureAudioSync, loadReferenceReverb, loadReferenceSample]
   );
 
   const startNote = useCallback(
