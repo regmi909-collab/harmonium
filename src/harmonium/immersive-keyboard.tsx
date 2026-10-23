@@ -883,7 +883,7 @@ export function ImmersiveHarmonium() {
               {/* Black keys */}
               {blackKeys.map((note) => {
                 const ww = 100 / whiteKeys.length;
-                const bw = ww * 0.65;
+                const bw = ww * 0.78;
                 const left = (note.whiteIndex + 1) * ww - bw / 2;
                 const isActive = activeNoteIds.includes(note.id);
                 return (
@@ -893,7 +893,7 @@ export function ImmersiveHarmonium() {
                     tabIndex={-1}
                     data-note-id={note.id}
                     aria-label={`${note.sargam} (${note.western})`}
-                    className="absolute top-0 z-10 flex h-[59%] flex-col justify-between rounded-b-[1.05rem] border-x border-t border-black/30 px-2 pt-3 pb-2.5 text-left select-none cursor-pointer"
+                    className="absolute top-0 z-10 flex h-[59%] flex-col justify-between rounded-b-[1.15rem] border-x border-t border-black/30 px-2.5 pt-3 pb-2.5 text-left select-none cursor-pointer"
                     style={{
                       left: `${left}%`,
                       width: `${bw}%`,
