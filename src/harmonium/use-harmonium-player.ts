@@ -17,10 +17,6 @@ const REFERENCE_ROOT_MIDI = 62;
 const REFERENCE_START_OFFSET = 0.065;
 const REFERENCE_LOOP_START = 0.5;
 
-// Minimum durations so quick taps and double-taps always speak clearly and animate smoothly
-const MIN_AUDIO_TAP_MS = 165;
-const MIN_VISUAL_TAP_MS = 80;
-
 // Pre-fetch raw WAV bytes immediately on module load so decoding is instant
 let preloadedSampleBytesPromise: Promise<ArrayBuffer | null> | null = null;
 let preloadedReverbBytesPromise: Promise<ArrayBuffer | null> | null = null;
@@ -170,10 +166,6 @@ export function useHarmoniumPlayer({
   const reverbConnectedRef = useRef(false);
   const voicesRef = useRef<Map<string, Voice>>(new Map());
   const requestedVoiceIdsRef = useRef<Set<string>>(new Set());
-  const physicallyHeldVoiceIdsRef = useRef<Set<string>>(new Set());
-  const voiceStartTimeRef = useRef<Map<string, number>>(new Map());
-  const pendingStopTimersRef = useRef<Map<string, number>>(new Map());
-  const pendingVisualTimersRef = useRef<Map<string, number>>(new Map());
   const sustainEnabledRef = useRef(false);
   const sustainedVoiceIdsRef = useRef<Set<string>>(new Set());
   const sampleBufferRef = useRef<AudioBuffer | null>(null);
@@ -334,15 +326,10 @@ export function useHarmoniumPlayer({
     };
   }, [ensureAudioSync]);
 
-  const releaseVoiceImmediate = useCallback((noteId: string) => {
-    const stopTimer = pendingStopTimersRef.current.get(noteId);
-    if (stopTimer !== undefined) {
-      window.clearTimeout(stopTimer);
-      pendingStopTimersRef.current.delete(noteId);
-    }
-
+  const stopNote = useCallback((noteId: string) => {
     requestedVoiceIdsRef.current.delete(noteId);
     sustainedVoiceIdsRef.current.delete(noteId);
+    setActiveNoteIds((current) => current.filter((id) => id !== noteId));
 
     const voice = voicesRef.current.get(noteId);
     if (!voice) {
@@ -350,75 +337,17 @@ export function useHarmoniumPlayer({
     }
 
     voicesRef.current.delete(noteId);
-    fadeOutAndStopVoice(voice, audioContextRef.current, 0.065);
+    fadeOutAndStopVoice(voice, audioContextRef.current, 0.035);
   }, []);
 
-  const stopNote = useCallback(
-    (noteId: string) => {
-      physicallyHeldVoiceIdsRef.current.delete(noteId);
-
-      const startTime = voiceStartTimeRef.current.get(noteId) ?? 0;
-      const elapsed = performance.now() - startTime;
-
-      // Keep visual key-down animation visible for at least MIN_VISUAL_TAP_MS on quick taps
-      const existingVisualTimer = pendingVisualTimersRef.current.get(noteId);
-      if (existingVisualTimer !== undefined) {
-        window.clearTimeout(existingVisualTimer);
-        pendingVisualTimersRef.current.delete(noteId);
-      }
-      if (elapsed < MIN_VISUAL_TAP_MS) {
-        const vTimer = window.setTimeout(() => {
-          pendingVisualTimersRef.current.delete(noteId);
-          if (!physicallyHeldVoiceIdsRef.current.has(noteId)) {
-            setActiveNoteIds((current) => current.filter((id) => id !== noteId));
-          }
-        }, MIN_VISUAL_TAP_MS - elapsed);
-        pendingVisualTimersRef.current.set(noteId, vTimer);
-      } else {
-        setActiveNoteIds((current) => current.filter((id) => id !== noteId));
-      }
-
-      // Keep audio reed speaking for at least MIN_AUDIO_TAP_MS on quick taps
-      const existingStopTimer = pendingStopTimersRef.current.get(noteId);
-      if (existingStopTimer !== undefined) {
-        window.clearTimeout(existingStopTimer);
-        pendingStopTimersRef.current.delete(noteId);
-      }
-      if (elapsed < MIN_AUDIO_TAP_MS) {
-        const aTimer = window.setTimeout(() => {
-          pendingStopTimersRef.current.delete(noteId);
-          if (!physicallyHeldVoiceIdsRef.current.has(noteId)) {
-            releaseVoiceImmediate(noteId);
-          }
-        }, MIN_AUDIO_TAP_MS - elapsed);
-        pendingStopTimersRef.current.set(noteId, aTimer);
-        return;
-      }
-
-      releaseVoiceImmediate(noteId);
-    },
-    [releaseVoiceImmediate]
-  );
-
   const stopAllNotes = useCallback(() => {
-    for (const timer of pendingStopTimersRef.current.values()) {
-      window.clearTimeout(timer);
-    }
-    pendingStopTimersRef.current.clear();
-
-    for (const timer of pendingVisualTimersRef.current.values()) {
-      window.clearTimeout(timer);
-    }
-    pendingVisualTimersRef.current.clear();
-
-    physicallyHeldVoiceIdsRef.current.clear();
     requestedVoiceIdsRef.current.clear();
     for (const noteId of [...voicesRef.current.keys()]) {
-      releaseVoiceImmediate(noteId);
+      stopNote(noteId);
     }
     sustainedVoiceIdsRef.current.clear();
     setActiveNoteIds([]);
-  }, [releaseVoiceImmediate]);
+  }, [stopNote]);
 
   const setMidiSustain = useCallback(
     (enabled: boolean) => {
@@ -452,18 +381,18 @@ export function useHarmoniumPlayer({
       gainNode: GainNode;
       sampleBuffer: AudioBuffer | null;
     }) => {
-      // If another voice is still playing for this voiceId (e.g. rapid double-tap),
-      // smoothly cross-fade it out so the new tap articulates cleanly
+      // If a previous voice for this note is still fading out or playing,
+      // stop it cleanly and re-trigger a fresh voice immediately
       const existingVoice = voicesRef.current.get(voiceId);
       if (existingVoice) {
-        fadeOutAndStopVoice(existingVoice, context, 0.014);
+        fadeOutAndStopVoice(existingVoice, context, 0.012);
         voicesRef.current.delete(voiceId);
       }
 
       const voiceGain = context.createGain();
       const now = context.currentTime;
       voiceGain.gain.setValueAtTime(0.0001, now);
-      voiceGain.gain.linearRampToValueAtTime(velocity, now + 0.008);
+      voiceGain.gain.linearRampToValueAtTime(velocity, now + 0.006);
       voiceGain.connect(gainNode);
 
       const sources: AudioScheduledSourceNode[] = [];
@@ -542,22 +471,8 @@ export function useHarmoniumPlayer({
       desiredMidi: number;
       velocity?: number;
     }) => {
-      // Cancel any pending stop/visual timer from a previous tap on this note
-      const pendingStop = pendingStopTimersRef.current.get(voiceId);
-      if (pendingStop !== undefined) {
-        window.clearTimeout(pendingStop);
-        pendingStopTimersRef.current.delete(voiceId);
-      }
-      const pendingVisual = pendingVisualTimersRef.current.get(voiceId);
-      if (pendingVisual !== undefined) {
-        window.clearTimeout(pendingVisual);
-        pendingVisualTimersRef.current.delete(voiceId);
-      }
-
-      physicallyHeldVoiceIdsRef.current.add(voiceId);
       requestedVoiceIdsRef.current.add(voiceId);
       sustainedVoiceIdsRef.current.delete(voiceId);
-      voiceStartTimeRef.current.set(voiceId, performance.now());
 
       // Synchronously create and resume AudioContext inside user gesture
       const context = ensureAudioSync(true);
@@ -600,18 +515,9 @@ export function useHarmoniumPlayer({
 
   const startNote = useCallback(
     async (note: NoteKey) => {
-      setActiveNoteIds((current) => {
-        if (current.includes(note.id)) {
-          // Briefly release for 1 frame so rapid double-taps visibly slide down again
-          window.requestAnimationFrame(() => {
-            setActiveNoteIds((next) =>
-              next.includes(note.id) ? next : [...next, note.id]
-            );
-          });
-          return current.filter((id) => id !== note.id);
-        }
-        return [...current, note.id];
-      });
+      setActiveNoteIds((current) =>
+        current.includes(note.id) ? current : [...current, note.id]
+      );
       await startVoice({
         voiceId: note.id,
         desiredMidi:

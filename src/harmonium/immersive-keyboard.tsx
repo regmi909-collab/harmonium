@@ -462,7 +462,6 @@ export function ImmersiveHarmonium() {
 
   // Unified Multi-Touch & Pointer tracking (each finger/pointer has its own key in the map)
   const pointerNotesRef = useRef<Map<string, string>>(new Map());
-  const usingTouchEventsRef = useRef(false);
 
   const resolveNoteIdAtPoint = useCallback(
     (clientX: number, clientY: number, target?: EventTarget | null): string | null => {
@@ -509,7 +508,6 @@ export function ImmersiveHarmonium() {
   // Hardware multi-touch handlers (tracks every finger simultaneously via touch.identifier)
   const handleTouchStart = useCallback(
     (e: React.TouchEvent<HTMLDivElement>) => {
-      usingTouchEventsRef.current = true;
       for (let i = 0; i < e.changedTouches.length; i++) {
         const touch = e.changedTouches[i];
         const noteId = resolveNoteIdAtPoint(
@@ -525,7 +523,6 @@ export function ImmersiveHarmonium() {
 
   const handleTouchMove = useCallback(
     (e: React.TouchEvent<HTMLDivElement>) => {
-      usingTouchEventsRef.current = true;
       for (let i = 0; i < e.changedTouches.length; i++) {
         const touch = e.changedTouches[i];
         const noteId = resolveNoteIdAtPoint(touch.clientX, touch.clientY);
@@ -537,13 +534,12 @@ export function ImmersiveHarmonium() {
 
   const handleTouchEndOrCancel = useCallback(
     (e: React.TouchEvent<HTMLDivElement>) => {
-      usingTouchEventsRef.current = true;
       for (let i = 0; i < e.changedTouches.length; i++) {
         const touch = e.changedTouches[i];
         updatePointerNote(`touch-${touch.identifier}`, null, false);
       }
 
-      // Reconcile any orphaned touch entries against remaining active touches
+      // Reconcile any orphaned entries against remaining active touches
       const remainingTouchKeys = new Set<string>();
       for (let i = 0; i < e.touches.length; i++) {
         remainingTouchKeys.add(`touch-${e.touches[i].identifier}`);
@@ -557,18 +553,16 @@ export function ImmersiveHarmonium() {
     [updatePointerNote]
   );
 
-  // Pointer handlers for mouse, stylus, or synthetic pointer environments
+  // Pointer handlers strictly for non-touch (mouse / stylus) so touch events never duplicate
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      if (e.pointerType === 'touch') return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-      if (e.pointerType === 'mouse') {
-        try {
-          e.currentTarget.setPointerCapture(e.pointerId);
-        } catch {
-          // Ignore capture errors
-        }
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore capture errors
       }
 
       const noteId = resolveNoteIdAtPoint(e.clientX, e.clientY, e.target);
@@ -579,7 +573,7 @@ export function ImmersiveHarmonium() {
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      if (e.pointerType === 'touch') return;
       const key = `ptr-${e.pointerId}`;
       if (!pointerNotesRef.current.has(key)) return;
       const noteId = resolveNoteIdAtPoint(e.clientX, e.clientY);
@@ -590,7 +584,7 @@ export function ImmersiveHarmonium() {
 
   const handlePointerUpOrCancel = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.pointerType === 'touch' && usingTouchEventsRef.current) return;
+      if (e.pointerType === 'touch') return;
       updatePointerNote(`ptr-${e.pointerId}`, null, false);
     },
     [updatePointerNote]
@@ -688,7 +682,6 @@ export function ImmersiveHarmonium() {
               { label: 'Bass', active: couplerBass, toggle: () => setCouplerBass((v) => !v) },
               { label: 'Male', active: couplerMale, toggle: () => setCouplerMale((v) => !v) },
               { label: 'Female', active: couplerFemale, toggle: () => setCouplerFemale((v) => !v) },
-              { label: 'Drone', active: couplerDrone, toggle: () => setCouplerDrone((v) => !v) },
             ] as const).map((c) => (
               <button
                 key={c.label}
