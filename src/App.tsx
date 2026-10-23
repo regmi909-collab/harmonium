@@ -3,107 +3,59 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BellowsAndStopsBar } from './components/BellowsAndStopsBar';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Sliders, VolumeX } from 'lucide-react';
 import { HarmoniumKeyboard } from './components/HarmoniumKeyboard';
-import { RecordedEvent, SidebarTabId, TouchSidebar } from './components/TouchSidebar';
-import { ReedStopsConfig, audioEngine } from './utils/audioEngine';
+import { TouchSidebar } from './components/TouchSidebar';
+import { audioEngine } from './utils/audioEngine';
 import {
-  BolStep,
   HarmoniumTimbreId,
-  MelodyDemo,
-  RAGA_SUGGESTIONS,
+  PITCH_CLASS_NAMES,
   RagaSuggestion,
   TAAL_DEFINITIONS,
   TaalDefinition,
   generateHarmoniumKeys,
+  getSwaraForMidi,
 } from './utils/musicTheory';
 
 export default function App() {
-  // Keyboard layout & key definitions
-  const [keyboardLayout, setKeyboardLayout] = useState<'pad-24' | 'concert-32'>('pad-24');
-  const keys = useMemo(() => generateHarmoniumKeys(keyboardLayout), [keyboardLayout]);
+  const keys = useMemo(() => generateHarmoniumKeys('pad-24'), []);
 
-  // Active & sustained notes
+  // Active & sustained harmonium keys
   const [activeNotes, setActiveNotes] = useState<Set<number>>(new Set());
   const [sustainedNotes, setSustainedNotes] = useState<Set<number>>(new Set());
   const [sustainMode, setSustainMode] = useState<boolean>(false);
 
-  // Scale / Tuning / Timbre
+  // Core sound & scale state
   const [rootPitchClass, setRootPitchClass] = useState<number>(0); // C = 0
-  const [a4ReferenceHz, setA4ReferenceHz] = useState<number>(440);
-  const [useJustIntonation, setUseJustIntonation] = useState<boolean>(true);
-  const [showDevanagari, setShowDevanagari] = useState<boolean>(true);
   const [timbre, setTimbre] = useState<HarmoniumTimbreId>('sarangi-ensemble');
-  const [masterVolume, setMasterVolume] = useState<number>(0.82);
+  const [coupler, setCoupler] = useState<boolean>(false);
+  const [masterVolume, setMasterVolume] = useState<number>(0.85);
+  const [activeRaga, setActiveRaga] = useState<RagaSuggestion | null>(null);
 
-  // Bellows & Reed Stops
-  const [bellowsPressure, setBellowsPressure] = useState<number>(0.88);
-  const [autoBellows, setAutoBellows] = useState<boolean>(true);
-  const [stops, setStops] = useState<ReedStopsConfig>(() => audioEngine.getStops());
-
-  // Raga Suggestion state
-  const [activeRaga, setActiveRaga] = useState<RagaSuggestion>(RAGA_SUGGESTIONS[0]);
-  const [showRagaGuide, setShowRagaGuide] = useState<boolean>(true);
-  const [ragaScaleLock, setRagaScaleLock] = useState<boolean>(false);
-
-  // Tanpura Drone state
+  // Tanpura & Rhythm (Madal / Tabla) state
   const [tanpuraEnabled, setTanpuraEnabled] = useState<boolean>(false);
-  const [tanpuraFirstString, setTanpuraFirstString] = useState<'Pa' | 'Ma' | 'Ni'>('Pa');
-  const [tanpuraVolume, setTanpuraVolume] = useState<number>(0.38);
-
-  // Tabla & Nepali Madal Rhythm state
   const [activeTaal, setActiveTaal] = useState<TaalDefinition>(TAAL_DEFINITIONS[0]);
   const [rhythmPlaying, setRhythmPlaying] = useState<boolean>(false);
-  const [bpm, setBpm] = useState<number>(TAAL_DEFINITIONS[0].defaultBpm);
-  const [rhythmVolume, setRhythmVolume] = useState<number>(0.68);
+  const [bpm, setBpm] = useState<number>(108);
   const [currentBeatIndex, setCurrentBeatIndex] = useState<number>(0);
 
-  // Sidebar state
+  // Sidebar open/close toggle for full-screen pad mode
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<SidebarTabId>('raga');
 
-  // Demo & Phrase Playback state
-  const [isPlayingPhrase, setIsPlayingPhrase] = useState<boolean>(false);
-  const [activeDemoId, setActiveDemoId] = useState<string | null>(null);
-  const demoTimersRef = useRef<number[]>([]);
-
-  // Live Performance Recorder state
-  const [isRecording, setIsRecording] = useState<boolean>(false);
-  const [recordedEvents, setRecordedEvents] = useState<RecordedEvent[]>([]);
-  const [isPlayingRecording, setIsPlayingRecording] = useState<boolean>(false);
-  const recordStartPerfRef = useRef<number>(0);
-  const activeRecordNoteStartsRef = useRef<Map<number, number>>(new Map());
-
-  // Sync audioEngine parameters when states change
   useEffect(() => {
     audioEngine.setRootPitch(rootPitchClass);
   }, [rootPitchClass]);
 
-  useEffect(() => {
-    audioEngine.setReferenceHz(a4ReferenceHz);
-  }, [a4ReferenceHz]);
-
-  useEffect(() => {
-    audioEngine.setJustIntonation(useJustIntonation);
-  }, [useJustIntonation]);
-
-  const handleNoteStart = useCallback(
-    (midi: number) => {
-      audioEngine.noteOn(midi);
-      setActiveNotes((prev) => {
-        if (prev.has(midi)) return prev;
-        const next = new Set(prev);
-        next.add(midi);
-        return next;
-      });
-
-      if (isRecording) {
-        activeRecordNoteStartsRef.current.set(midi, performance.now() - recordStartPerfRef.current);
-      }
-    },
-    [isRecording]
-  );
+  const handleNoteStart = useCallback((midi: number) => {
+    audioEngine.noteOn(midi);
+    setActiveNotes((prev) => {
+      if (prev.has(midi)) return prev;
+      const next = new Set(prev);
+      next.add(midi);
+      return next;
+    });
+  }, []);
 
   const handleNoteStop = useCallback(
     (midi: number) => {
@@ -115,15 +67,8 @@ export default function App() {
         next.delete(midi);
         return next;
       });
-
-      if (isRecording && activeRecordNoteStartsRef.current.has(midi)) {
-        const startTimeMs = activeRecordNoteStartsRef.current.get(midi)!;
-        activeRecordNoteStartsRef.current.delete(midi);
-        const durationMs = Math.max(80, performance.now() - recordStartPerfRef.current - startTimeMs);
-        setRecordedEvents((prev) => [...prev, { midi, startTimeMs, durationMs }]);
-      }
     },
-    [isRecording, sustainedNotes]
+    [sustainedNotes]
   );
 
   const handleToggleSustainNote = useCallback((midi: number) => {
@@ -140,17 +85,12 @@ export default function App() {
     });
   }, []);
 
-  const handleClearSustainedNotes = useCallback(() => {
+  const handleClearSustained = useCallback(() => {
     sustainedNotes.forEach((midi) => audioEngine.noteOff(midi));
     setSustainedNotes(new Set());
   }, [sustainedNotes]);
 
   const handleSilenceAll = useCallback(() => {
-    demoTimersRef.current.forEach((id) => clearTimeout(id));
-    demoTimersRef.current = [];
-    setIsPlayingPhrase(false);
-    setActiveDemoId(null);
-    setIsPlayingRecording(false);
     setRhythmPlaying(false);
     setTanpuraEnabled(false);
     audioEngine.setTanpuraConfig({ enabled: false });
@@ -159,7 +99,7 @@ export default function App() {
     setSustainedNotes(new Set());
   }, []);
 
-  // Physical Keyboard listeners for Lenovo Pad keyboard dock / desktop
+  // Keyboard shortcuts (A–L, W–P, Z–C)
   useEffect(() => {
     const shortcutMap = new Map<string, number>();
     keys.forEach((k) => {
@@ -170,10 +110,6 @@ export default function App() {
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
-        return;
-      }
       const midi = shortcutMap.get(e.key.toLowerCase());
       if (midi !== undefined) {
         e.preventDefault();
@@ -197,32 +133,11 @@ export default function App() {
     };
   }, [keys, handleNoteStart, handleNoteStop]);
 
-  // Manual Bellows decay & pump simulation when Auto-Bellows is off
-  useEffect(() => {
-    if (autoBellows) return;
-    const interval = window.setInterval(() => {
-      setBellowsPressure((prev) => {
-        const decayRate = activeNotes.size > 0 || sustainedNotes.size > 0 ? 0.035 : 0.012;
-        const next = Math.max(0.15, prev - decayRate);
-        audioEngine.setBellowsPressure(next);
-        return next;
-      });
-    }, 180);
-    return () => clearInterval(interval);
-  }, [autoBellows, activeNotes.size, sustainedNotes.size]);
-
-  const handlePumpBellows = () => {
-    const boosted = Math.min(1, bellowsPressure + 0.25);
-    setBellowsPressure(boosted);
-    audioEngine.setBellowsPressure(boosted);
-  };
-
-  // Tabla & Nepali Madal Rhythm Cycle Engine
+  // Madal & Tabla Rhythm Scheduler
   useEffect(() => {
     if (!rhythmPlaying) return;
 
     const beatIntervalMs = Math.round(60000 / bpm);
-    // Play immediate beat on start
     const initialStep = activeTaal.steps[currentBeatIndex % activeTaal.beats];
     if (initialStep) {
       audioEngine.triggerPercussionBol(initialStep, activeTaal.instrument);
@@ -242,378 +157,134 @@ export default function App() {
     return () => clearInterval(timer);
   }, [rhythmPlaying, bpm, activeTaal]);
 
-  // Play Raga Pakad Phrase
-  const handleTogglePlayRagaPhrase = () => {
-    demoTimersRef.current.forEach((id) => clearTimeout(id));
-    demoTimersRef.current = [];
+  const combinedMidis = Array.from(
+    new Set([...Array.from(activeNotes), ...Array.from(sustainedNotes)])
+  ).sort((a, b) => a - b);
 
-    if (isPlayingPhrase) {
-      setIsPlayingPhrase(false);
-      audioEngine.stopAllNotes();
-      setActiveNotes(new Set());
-      return;
-    }
-
-    setActiveDemoId(null);
-    setIsPlayingPhrase(true);
-
-    let accumulatedMs = 0;
-    const baseMiddleSa = 60 + rootPitchClass;
-
-    activeRaga.pakadSemitones.forEach((item) => {
-      const midi = baseMiddleSa + item.semitone + (item.octaveOffset ? item.octaveOffset * 12 : 0);
-      const startTimer = window.setTimeout(() => {
-        handleNoteStart(midi);
-      }, accumulatedMs);
-      const stopTimer = window.setTimeout(() => {
-        handleNoteStop(midi);
-      }, accumulatedMs + Math.max(120, item.durationMs - 45));
-
-      demoTimersRef.current.push(startTimer, stopTimer);
-      accumulatedMs += item.durationMs;
-    });
-
-    const endTimer = window.setTimeout(() => {
-      setIsPlayingPhrase(false);
-    }, accumulatedMs + 100);
-    demoTimersRef.current.push(endTimer);
-  };
-
-  // Play Interactive Melody Demo (e.g., Resham Firiri)
-  const handlePlayMelodyDemo = (demo: MelodyDemo) => {
-    demoTimersRef.current.forEach((id) => clearTimeout(id));
-    demoTimersRef.current = [];
-    audioEngine.stopAllNotes();
-    setActiveNotes(new Set());
-
-    const matchingRaga = RAGA_SUGGESTIONS.find((r) => r.id === demo.ragaId);
-    if (matchingRaga) {
-      setActiveRaga(matchingRaga);
-    }
-    const matchingTaal = TAAL_DEFINITIONS.find((t) => t.id === demo.taalId);
-    if (matchingTaal) {
-      setActiveTaal(matchingTaal);
-      setBpm(demo.bpm);
-    }
-
-    setIsPlayingPhrase(false);
-    setActiveDemoId(demo.id);
-
-    let accumulatedMs = 0;
-    const baseMiddleSa = 60 + rootPitchClass;
-
-    demo.notes.forEach((n) => {
-      const midi = baseMiddleSa + n.semitone + n.octaveOffset * 12;
-      const tOn = window.setTimeout(() => {
-        handleNoteStart(midi);
-      }, accumulatedMs);
-      const tOff = window.setTimeout(() => {
-        handleNoteStop(midi);
-      }, accumulatedMs + Math.max(110, n.durationMs - 40));
-
-      demoTimersRef.current.push(tOn, tOff);
-      accumulatedMs += n.durationMs;
-    });
-
-    const tFinish = window.setTimeout(() => {
-      setActiveDemoId(null);
-    }, accumulatedMs + 120);
-    demoTimersRef.current.push(tFinish);
-  };
-
-  const handleStopMelodyDemo = () => {
-    demoTimersRef.current.forEach((id) => clearTimeout(id));
-    demoTimersRef.current = [];
-    setActiveDemoId(null);
-    audioEngine.stopAllNotes();
-    setActiveNotes(new Set());
-  };
-
-  // Apply Recommended Taal & Folk Timbre for a Raga
-  const handleApplyRagaRecommendedSetup = (raga: RagaSuggestion) => {
-    const recTaal = TAAL_DEFINITIONS.find((t) => t.id === raga.recommendedTaalId);
-    if (recTaal) {
-      setActiveTaal(recTaal);
-      setBpm(recTaal.defaultBpm);
-      setCurrentBeatIndex(0);
-    }
-    setTimbre(raga.recommendedTimbre);
-    audioEngine.setTimbre(raga.recommendedTimbre);
-    setStops(audioEngine.getStops());
-  };
-
-  // Recorder handlers
-  const handleStartRecording = () => {
-    setRecordedEvents([]);
-    activeRecordNoteStartsRef.current.clear();
-    recordStartPerfRef.current = performance.now();
-    setIsRecording(true);
-  };
-
-  const handleStopRecording = () => {
-    setIsRecording(false);
-    activeRecordNoteStartsRef.current.clear();
-  };
-
-  const handlePlayRecording = () => {
-    if (recordedEvents.length === 0) return;
-    demoTimersRef.current.forEach((id) => clearTimeout(id));
-    demoTimersRef.current = [];
-    setIsPlayingRecording(true);
-
-    const firstOffset = recordedEvents[0].startTimeMs;
-    let maxEnd = 0;
-
-    recordedEvents.forEach((ev) => {
-      const relStart = Math.max(0, ev.startTimeMs - firstOffset);
-      const relEnd = relStart + ev.durationMs;
-      if (relEnd > maxEnd) maxEnd = relEnd;
-
-      const t1 = window.setTimeout(() => handleNoteStart(ev.midi), relStart);
-      const t2 = window.setTimeout(() => handleNoteStop(ev.midi), relEnd);
-      demoTimersRef.current.push(t1, t2);
-    });
-
-    const tDone = window.setTimeout(() => {
-      setIsPlayingRecording(false);
-    }, maxEnd + 100);
-    demoTimersRef.current.push(tDone);
-  };
-
-  const navigateSidebarTab = (tab: SidebarTabId) => {
-    setActiveTab(tab);
-    setSidebarOpen(true);
-  };
+  const rootName = PITCH_CLASS_NAMES[rootPitchClass];
 
   return (
     <div className="w-screen h-screen flex flex-col bg-[#120e0a] text-[#f5efe6] overflow-hidden select-none">
-      {/* Top Bar Contract: 3 Zones separated by gap-8 */}
-      <header className="flex items-center justify-between gap-8 px-5 py-2.5 bg-[#160f0a] border-b border-amber-900/40 shrink-0">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#top"
-          onClick={(e) => e.preventDefault()}
-          className="text-lg font-bold tracking-tight text-amber-200 whitespace-nowrap shrink-0 font-display"
-        >
-          SargamPad
-        </a>
+      {/* Minimal Top Key Status Bar */}
+      <header className="flex items-center justify-between gap-4 px-4 py-2 bg-[#160f0a] border-b border-amber-900/40 shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="text-base font-bold tracking-tight text-amber-200 font-display whitespace-nowrap shrink-0">
+            SargamPad
+          </span>
+          <span className="text-amber-700/60">·</span>
 
-        {/* Zone 2: 4 single-line navigation links */}
-        <nav aria-label="Primary Studio Navigation" className="hidden md:flex items-center gap-6 text-sm font-medium text-amber-100/75">
-          <button
-            type="button"
-            onClick={() => navigateSidebarTab('raga')}
-            className={`hover:text-amber-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              sidebarOpen && activeTab === 'raga' ? 'text-amber-300 font-semibold underline' : ''
-            }`}
-          >
-            Raga Guide
-          </button>
-          <button
-            type="button"
-            onClick={() => navigateSidebarTab('rhythm')}
-            className={`hover:text-amber-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              sidebarOpen && activeTab === 'rhythm' ? 'text-amber-300 font-semibold underline' : ''
-            }`}
-          >
-            Tanpura & Taal
-          </button>
-          <button
-            type="button"
-            onClick={() => navigateSidebarTab('sound')}
-            className={`hover:text-amber-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              sidebarOpen && activeTab === 'sound' ? 'text-amber-300 font-semibold underline' : ''
-            }`}
-          >
-            Reed Voicing
-          </button>
-          <button
-            type="button"
-            onClick={() => navigateSidebarTab('practice')}
-            className={`hover:text-amber-200 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              sidebarOpen && activeTab === 'practice' ? 'text-amber-300 font-semibold underline' : ''
-            }`}
-          >
-            Folk Demos
-          </button>
-        </nav>
+          {/* Live Key Readout */}
+          <div className="truncate text-sm font-medium" data-testid="live-note-readout">
+            {combinedMidis.length > 0 ? (
+              <span className="text-amber-300 font-bold">
+                Playing:{' '}
+                {combinedMidis
+                  .map((m) => {
+                    const sw = getSwaraForMidi(m, rootPitchClass);
+                    return `${sw.short} (${PITCH_CLASS_NAMES[m % 12]}${Math.floor(m / 12) - 1})`;
+                  })
+                  .join(' + ')}
+              </span>
+            ) : (
+              <span className="text-amber-100/70">
+                Sa = {rootName}
+                {activeRaga ? ` · ${activeRaga.name}` : ''}
+                {tanpuraEnabled ? ' · Tanpura On' : ''}
+                {rhythmPlaying ? ` · ${activeTaal.instrument === 'madal' ? 'Madal' : 'Tabla'} (${bpm} BPM)` : ''}
+              </span>
+            )}
+          </div>
+        </div>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          {(combinedMidis.length > 0 || tanpuraEnabled || rhythmPlaying) && (
+            <button
+              type="button"
+              onClick={handleSilenceAll}
+              className="min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#2a1b11] hover:bg-[#382417] text-amber-200 border border-amber-700/40 flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <VolumeX className="w-3.5 h-3.5" />
+              <span>Stop All</span>
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={handleSilenceAll}
-            className="min-h-[40px] px-4 py-1.5 text-xs font-semibold text-amber-100 bg-[#2b1c12] hover:bg-[#3a2619] border border-amber-700/40 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen((prev) => !prev)}
+            className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-colors whitespace-nowrap ${
+              sidebarOpen
+                ? 'bg-amber-600 text-stone-950 border-amber-400'
+                : 'bg-[#2a1b11] text-amber-100 border-amber-700/40 hover:bg-[#382417]'
+            }`}
           >
-            Silence All
+            <Sliders className="w-3.5 h-3.5" />
+            <span>{sidebarOpen ? 'Hide Sidebar' : 'Options'}</span>
           </button>
         </div>
       </header>
 
-      {/* Main Lenovo Pad Split Stage: Key Function Display + Collapsible Touch Sidebar */}
+      {/* Main Pad Workspace: Only Keys + Simple Touch Sidebar */}
       <main className="flex-1 flex flex-col md:flex-row w-full h-full overflow-hidden">
-        {/* Primary Key Function Display Stage */}
-        <section
-          aria-label="Harmonium Key Function Stage"
-          className="flex-1 flex flex-col h-full min-w-0 overflow-hidden"
-        >
-          <BellowsAndStopsBar
-            activeNotes={activeNotes}
-            sustainedNotes={sustainedNotes}
-            rootPitchClass={rootPitchClass}
-            a4ReferenceHz={a4ReferenceHz}
-            useJustIntonation={useJustIntonation}
-            bellowsPressure={bellowsPressure}
-            autoBellows={autoBellows}
-            onChangeBellowsPressure={(val) => {
-              setBellowsPressure(val);
-              audioEngine.setBellowsPressure(val);
-            }}
-            onToggleAutoBellows={() => setAutoBellows((prev) => !prev)}
-            onPumpBellows={handlePumpBellows}
-            stops={stops}
-            onToggleStop={(stopKey) => {
-              const updated = { ...stops, [stopKey]: !stops[stopKey] };
-              setStops(updated);
-              audioEngine.updateStops({ [stopKey]: updated[stopKey] });
-            }}
+        <HarmoniumKeyboard
+          keys={keys}
+          activeNotes={activeNotes}
+          sustainedNotes={sustainedNotes}
+          rootPitchClass={rootPitchClass}
+          activeRaga={activeRaga}
+          sustainMode={sustainMode}
+          onNoteStart={handleNoteStart}
+          onNoteStop={handleNoteStop}
+          onToggleSustainNote={handleToggleSustainNote}
+        />
+
+        {sidebarOpen && (
+          <TouchSidebar
             timbre={timbre}
             onChangeTimbre={(newTimbre) => {
               setTimbre(newTimbre);
               audioEngine.setTimbre(newTimbre);
-              setStops(audioEngine.getStops());
+            }}
+            coupler={coupler}
+            onToggleCoupler={() => {
+              const next = !coupler;
+              setCoupler(next);
+              audioEngine.updateStops({ coupler: next });
             }}
             sustainMode={sustainMode}
             onToggleSustainMode={() => setSustainMode((prev) => !prev)}
-            onClearSustainedNotes={handleClearSustainedNotes}
-            tanpuraEnabled={tanpuraEnabled}
-            onToggleTanpura={() => {
-              const next = !tanpuraEnabled;
-              setTanpuraEnabled(next);
-              audioEngine.setTanpuraConfig({ enabled: next, firstString: tanpuraFirstString, volume: tanpuraVolume });
+            sustainedCount={sustainedNotes.size}
+            onClearSustained={handleClearSustained}
+            masterVolume={masterVolume}
+            onChangeMasterVolume={(vol) => {
+              setMasterVolume(vol);
+              audioEngine.setMasterVolume(vol);
             }}
-            rhythmPlaying={rhythmPlaying}
-            onToggleRhythm={() => {
-              setCurrentBeatIndex(0);
-              setRhythmPlaying((prev) => !prev);
-            }}
-            activeTaal={activeTaal}
-            currentBeatIndex={currentBeatIndex}
-            bpm={bpm}
-            activeRaga={activeRaga}
-            isPlayingDemo={isPlayingPhrase || activeDemoId !== null}
-            onTogglePlayRagaPhrase={handleTogglePlayRagaPhrase}
-            sidebarOpen={sidebarOpen}
-            onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
-          />
-
-          <HarmoniumKeyboard
-            keys={keys}
-            activeNotes={activeNotes}
-            sustainedNotes={sustainedNotes}
-            rootPitchClass={rootPitchClass}
-            a4ReferenceHz={a4ReferenceHz}
-            useJustIntonation={useJustIntonation}
-            activeRaga={activeRaga}
-            showRagaGuide={showRagaGuide}
-            ragaScaleLock={ragaScaleLock}
-            showDevanagari={showDevanagari}
-            sustainMode={sustainMode}
-            onNoteStart={handleNoteStart}
-            onNoteStop={handleNoteStop}
-            onToggleSustainNote={handleToggleSustainNote}
-          />
-        </section>
-
-        {/* Collapsible Touch Options Sidebar */}
-        {sidebarOpen && (
-          <TouchSidebar
-            activeTab={activeTab}
-            onSelectTab={setActiveTab}
-            activeRaga={activeRaga}
-            onSelectRaga={(raga) => setActiveRaga(raga)}
-            showRagaGuide={showRagaGuide}
-            onToggleShowRagaGuide={() => setShowRagaGuide((prev) => !prev)}
-            ragaScaleLock={ragaScaleLock}
-            onToggleRagaScaleLock={() => setRagaScaleLock((prev) => !prev)}
-            isPlayingDemo={isPlayingPhrase}
-            onTogglePlayRagaPhrase={handleTogglePlayRagaPhrase}
-            onApplyRagaRecommendedSetup={handleApplyRagaRecommendedSetup}
             rootPitchClass={rootPitchClass}
             onChangeRootPitchClass={(pc) => setRootPitchClass(pc)}
             tanpuraEnabled={tanpuraEnabled}
             onToggleTanpura={() => {
               const next = !tanpuraEnabled;
               setTanpuraEnabled(next);
-              audioEngine.setTanpuraConfig({ enabled: next, firstString: tanpuraFirstString, volume: tanpuraVolume });
+              audioEngine.setTanpuraConfig({ enabled: next });
             }}
-            tanpuraFirstString={tanpuraFirstString}
-            onChangeTanpuraFirstString={(str) => {
-              setTanpuraFirstString(str);
-              audioEngine.setTanpuraConfig({ firstString: str });
-            }}
-            tanpuraVolume={tanpuraVolume}
-            onChangeTanpuraVolume={(vol) => {
-              setTanpuraVolume(vol);
-              audioEngine.setTanpuraConfig({ volume: vol });
-            }}
+            rhythmPlaying={rhythmPlaying}
             activeTaal={activeTaal}
-            onSelectTaal={(taal) => {
+            onSelectAndPlayTaal={(taal) => {
+              if (!taal) {
+                setRhythmPlaying(false);
+                return;
+              }
               setActiveTaal(taal);
               setBpm(taal.defaultBpm);
               setCurrentBeatIndex(0);
-            }}
-            rhythmPlaying={rhythmPlaying}
-            onToggleRhythm={() => {
-              setCurrentBeatIndex(0);
-              setRhythmPlaying((prev) => !prev);
+              setRhythmPlaying(true);
             }}
             bpm={bpm}
             onChangeBpm={(newBpm) => setBpm(newBpm)}
-            rhythmVolume={rhythmVolume}
-            onChangeRhythmVolume={(vol) => {
-              setRhythmVolume(vol);
-              audioEngine.setRhythmVolume(vol);
-            }}
             currentBeatIndex={currentBeatIndex}
-            onAuditionBolStep={(step: BolStep, instrument: 'madal' | 'tabla') => {
-              audioEngine.triggerPercussionBol(step, instrument);
-            }}
-            timbre={timbre}
-            onChangeTimbre={(t) => {
-              setTimbre(t);
-              audioEngine.setTimbre(t);
-              setStops(audioEngine.getStops());
-            }}
-            stops={stops}
-            onUpdateStops={(partial) => {
-              const next = { ...stops, ...partial };
-              setStops(next);
-              audioEngine.updateStops(partial);
-            }}
-            masterVolume={masterVolume}
-            onChangeMasterVolume={(vol) => {
-              setMasterVolume(vol);
-              audioEngine.setMasterVolume(vol);
-            }}
-            keyboardLayout={keyboardLayout}
-            onChangeKeyboardLayout={(mode) => setKeyboardLayout(mode)}
-            a4ReferenceHz={a4ReferenceHz}
-            onChangeReferenceHz={(hz) => setA4ReferenceHz(hz)}
-            useJustIntonation={useJustIntonation}
-            onToggleJustIntonation={() => setUseJustIntonation((prev) => !prev)}
-            showDevanagari={showDevanagari}
-            onToggleShowDevanagari={() => setShowDevanagari((prev) => !prev)}
-            activeDemoId={activeDemoId}
-            onPlayMelodyDemo={handlePlayMelodyDemo}
-            onStopMelodyDemo={handleStopMelodyDemo}
-            isRecording={isRecording}
-            recordedEvents={recordedEvents}
-            isPlayingRecording={isPlayingRecording}
-            onStartRecording={handleStartRecording}
-            onStopRecording={handleStopRecording}
-            onPlayRecording={handlePlayRecording}
-            onClearRecording={() => setRecordedEvents([])}
+            activeRaga={activeRaga}
+            onSelectRaga={(raga) => setActiveRaga(raga)}
           />
         )}
       </main>
