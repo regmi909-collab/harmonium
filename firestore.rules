@@ -1,0 +1,212 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 & Phase 4.1: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidLabelMode(val) {
+      return val is string && val.size() >= 4 && val.size() <= 10 && (val == 'none' || val == 'sargam' || val == 'western');
+    }
+
+    function isValidReedMode(val) {
+      return val is string && val.size() == 6 && (val == 'single' || val == 'double');
+    }
+
+    function isValidChordMode(val) {
+      return val is string && val.size() >= 3 && val.size() <= 5 && (val == 'off' || val == 'major' || val == 'minor');
+    }
+
+    // Pillar 2: Validation Blueprint for UserPreference
+    function isValidUserPreference(data, userId) {
+      return data.keys().hasAll([
+        'ownerId',
+        'labelMode',
+        'sargamOffset',
+        'octave',
+        'transpose',
+        'volume',
+        'reverbEnabled',
+        'reedMode',
+        'chordMode',
+        'couplerBass',
+        'couplerMale',
+        'couplerFemale',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId',
+        'labelMode',
+        'sargamOffset',
+        'octave',
+        'transpose',
+        'volume',
+        'reverbEnabled',
+        'reedMode',
+        'chordMode',
+        'couplerBass',
+        'couplerMale',
+        'couplerFemale',
+        'updatedAt'
+      ]) &&
+      isValidId(data.ownerId) &&
+      data.ownerId == request.auth.uid &&
+      data.ownerId == userId &&
+      isValidLabelMode(data.labelMode) &&
+      data.sargamOffset is number && data.sargamOffset >= 0 && data.sargamOffset <= 11 &&
+      data.octave is number && data.octave >= 2 && data.octave <= 6 &&
+      data.transpose is number && data.transpose >= -12 && data.transpose <= 12 &&
+      data.volume is number && data.volume >= 0 && data.volume <= 1 &&
+      data.reverbEnabled is bool &&
+      isValidReedMode(data.reedMode) &&
+      isValidChordMode(data.chordMode) &&
+      data.couplerBass is bool &&
+      data.couplerMale is bool &&
+      data.couplerFemale is bool &&
+      data.updatedAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    // Pillar 2: Validation Blueprint for HarmoniumPreset
+    function isValidHarmoniumPreset(data, userId) {
+      return data.keys().hasAll([
+        'ownerId',
+        'name',
+        'labelMode',
+        'sargamOffset',
+        'octave',
+        'transpose',
+        'volume',
+        'reverbEnabled',
+        'reedMode',
+        'couplerBass',
+        'couplerMale',
+        'couplerFemale',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId',
+        'name',
+        'labelMode',
+        'sargamOffset',
+        'octave',
+        'transpose',
+        'volume',
+        'reverbEnabled',
+        'reedMode',
+        'couplerBass',
+        'couplerMale',
+        'couplerFemale',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.ownerId) &&
+      data.ownerId == request.auth.uid &&
+      data.ownerId == userId &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+      isValidLabelMode(data.labelMode) &&
+      data.sargamOffset is number && data.sargamOffset >= 0 && data.sargamOffset <= 11 &&
+      data.octave is number && data.octave >= 2 && data.octave <= 6 &&
+      data.transpose is number && data.transpose >= -12 && data.transpose <= 12 &&
+      data.volume is number && data.volume >= 0 && data.volume <= 1 &&
+      data.reverbEnabled is bool &&
+      isValidReedMode(data.reedMode) &&
+      data.couplerBass is bool &&
+      data.couplerMale is bool &&
+      data.couplerFemale is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    // User Preferences Collection: /users/{userId}/settings/{settingId}
+    match /users/{userId}/settings/{settingId} {
+      allow get: if isOwner(userId) && isValidId(settingId) && settingId == 'preferences';
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+        isValidId(settingId) &&
+        settingId == 'preferences' &&
+        isValidUserPreference(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+        isValidId(settingId) &&
+        settingId == 'preferences' &&
+        isValidUserPreference(incoming(), userId) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'labelMode',
+          'sargamOffset',
+          'octave',
+          'transpose',
+          'volume',
+          'reverbEnabled',
+          'reedMode',
+          'chordMode',
+          'couplerBass',
+          'couplerMale',
+          'couplerFemale',
+          'updatedAt'
+        ]);
+
+      allow delete: if isOwner(userId) && isValidId(settingId) && settingId == 'preferences';
+    }
+
+    // User Saved Harmonium Presets Collection: /users/{userId}/presets/{presetId}
+    match /users/{userId}/presets/{presetId} {
+      allow get: if isOwner(userId) && isValidId(presetId) && existing().ownerId == request.auth.uid;
+      allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+
+      allow create: if isOwner(userId) &&
+        isValidId(presetId) &&
+        isValidHarmoniumPreset(incoming(), userId) &&
+        incoming().createdAt == request.time;
+
+      allow update: if isOwner(userId) &&
+        isValidId(presetId) &&
+        isValidHarmoniumPreset(incoming(), userId) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'labelMode',
+          'sargamOffset',
+          'octave',
+          'transpose',
+          'volume',
+          'reverbEnabled',
+          'reedMode',
+          'couplerBass',
+          'couplerMale',
+          'couplerFemale',
+          'updatedAt'
+        ]);
+
+      allow delete: if isOwner(userId) && isValidId(presetId) && existing().ownerId == request.auth.uid;
+    }
+  }
+}

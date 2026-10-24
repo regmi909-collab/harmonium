@@ -1,0 +1,197 @@
+{
+  "entities": {
+    "UserPreference": {
+      "title": "UserPreference",
+      "description": "Per-user harmonium, tanpura, and tabla configuration synced to the cloud.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "The UID of the user who owns these preferences.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "labelMode": {
+          "type": "string",
+          "description": "Keyboard label display mode.",
+          "enum": ["none", "sargam", "western"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "sargamOffset": {
+          "type": "number",
+          "description": "Root pitch class offset for Sa (0-11)."
+        },
+        "octave": {
+          "type": "number",
+          "description": "Base octave setting (2-6)."
+        },
+        "transpose": {
+          "type": "number",
+          "description": "Semitone transpose offset (-12 to 12)."
+        },
+        "volume": {
+          "type": "number",
+          "description": "Master harmonium volume (0 to 1)."
+        },
+        "reverbEnabled": {
+          "type": "boolean",
+          "description": "Whether room reverb is enabled."
+        },
+        "reedMode": {
+          "type": "string",
+          "description": "Single or double reed voice mode.",
+          "enum": ["single", "double"],
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "chordMode": {
+          "type": "string",
+          "description": "Chord suggestion mode.",
+          "enum": ["off", "major", "minor"],
+          "minLength": 3,
+          "maxLength": 5
+        },
+        "couplerBass": {
+          "type": "boolean",
+          "description": "Whether Bass coupler is active."
+        },
+        "couplerMale": {
+          "type": "boolean",
+          "description": "Whether Male coupler is active."
+        },
+        "couplerFemale": {
+          "type": "boolean",
+          "description": "Whether Female coupler is active."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "labelMode",
+        "sargamOffset",
+        "octave",
+        "transpose",
+        "volume",
+        "reverbEnabled",
+        "reedMode",
+        "chordMode",
+        "couplerBass",
+        "couplerMale",
+        "couplerFemale",
+        "updatedAt"
+      ]
+    },
+    "HarmoniumPreset": {
+      "title": "HarmoniumPreset",
+      "description": "A user-saved harmonium, raga, tanpura, and tabla preset.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "The UID of the user who created this preset.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the saved preset.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "labelMode": {
+          "type": "string",
+          "description": "Keyboard label display mode.",
+          "enum": ["none", "sargam", "western"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "sargamOffset": {
+          "type": "number",
+          "description": "Root pitch class offset for Sa (0-11)."
+        },
+        "octave": {
+          "type": "number",
+          "description": "Base octave setting (2-6)."
+        },
+        "transpose": {
+          "type": "number",
+          "description": "Semitone transpose offset (-12 to 12)."
+        },
+        "volume": {
+          "type": "number",
+          "description": "Master harmonium volume (0 to 1)."
+        },
+        "reverbEnabled": {
+          "type": "boolean",
+          "description": "Whether room reverb is enabled."
+        },
+        "reedMode": {
+          "type": "string",
+          "description": "Single or double reed voice mode.",
+          "enum": ["single", "double"],
+          "minLength": 6,
+          "maxLength": 6
+        },
+        "couplerBass": {
+          "type": "boolean",
+          "description": "Whether Bass coupler is active."
+        },
+        "couplerMale": {
+          "type": "boolean",
+          "description": "Whether Male coupler is active."
+        },
+        "couplerFemale": {
+          "type": "boolean",
+          "description": "Whether Female coupler is active."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the preset was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the preset was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "labelMode",
+        "sargamOffset",
+        "octave",
+        "transpose",
+        "volume",
+        "reverbEnabled",
+        "reedMode",
+        "couplerBass",
+        "couplerMale",
+        "couplerFemale",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/settings/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/UserPreference"
+      },
+      "description": "Stores per-user cloud-synced harmonium settings (settingId = 'preferences')."
+    },
+    "/users/{userId}/presets/{presetId}": {
+      "schema": {
+        "$ref": "#/entities/HarmoniumPreset"
+      },
+      "description": "Stores user-created named harmonium presets."
+    }
+  }
+}

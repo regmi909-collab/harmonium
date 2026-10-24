@@ -1,4 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { collection, doc, onSnapshot } from 'firebase/firestore';
+import {
+  auth,
+  db,
+  deleteHarmoniumPresetFromCloud,
+  handleFirestoreError,
+  HarmoniumPresetRecord,
+  MAX_PRESET_NAME_LENGTH,
+  OperationType,
+  saveHarmoniumPresetToCloud,
+  saveUserPreferencesToCloud,
+  signInWithGoogle,
+  signOutUser,
+} from '../firebase';
 import {
   getNoteKeyByInput,
   getOctaveOption,
@@ -376,6 +391,13 @@ export function ImmersiveHarmonium() {
     return () => window.clearInterval(interval);
   }, [tablaEnabled, tablaTaal, tablaSpeed, tablaVolume, tablaPitch]);
 
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [presets, setPresets] = useState<HarmoniumPresetRecord[]>([]);
+  const [newPresetName, setNewPresetName] = useState('');
+  const [cloudStatus, setCloudStatus] = useState<string | null>(null);
+  const loadedCloudPrefsRef = useRef(false);
+
   // Restore / persist settings from localStorage
   useEffect(() => {
     try {
@@ -412,6 +434,200 @@ export function ImmersiveHarmonium() {
       // Ignore storage errors
     }
   }, [labelMode, octave, transpose, volume, reverbEnabled, reedMode]);
+
+  // Firebase Auth listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthReady(true);
+      if (!currentUser) {
+        loadedCloudPrefsRef.current = false;
+        setPresets([]);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Firestore listeners for user preferences & saved presets
+  useEffect(() => {
+    if (!authReady || !user) return;
+
+    const prefPath = `users/${user.uid}/settings/preferences`;
+    const unsubPrefs = onSnapshot(
+      doc(db, 'users', user.uid, 'settings', 'preferences'),
+      (snap) => {
+        if (!snap.exists()) {
+          loadedCloudPrefsRef.current = true;
+          return;
+        }
+        const data = snap.data();
+        if (
+          data.labelMode === 'none' ||
+          data.labelMode === 'sargam' ||
+          data.labelMode === 'western'
+        ) {
+          setLabelMode(data.labelMode);
+        }
+        if (typeof data.sargamOffset === 'number') {
+          setSargamOffset(Math.min(11, Math.max(0, data.sargamOffset)));
+        }
+        if (typeof data.octave === 'number') {
+          setOctave(getOctaveOption(data.octave).value);
+        }
+        if (typeof data.transpose === 'number') {
+          setTranspose(Math.min(12, Math.max(-12, data.transpose)));
+        }
+        if (typeof data.volume === 'number') {
+          setVolume(Math.min(1, Math.max(0, data.volume)));
+        }
+        if (typeof data.reverbEnabled === 'boolean') {
+          setReverbEnabled(data.reverbEnabled);
+        }
+        if (data.reedMode === 'single' || data.reedMode === 'double') {
+          setReedMode(data.reedMode);
+        }
+        if (
+          data.chordMode === 'off' ||
+          data.chordMode === 'major' ||
+          data.chordMode === 'minor'
+        ) {
+          setChordMode(data.chordMode);
+        }
+        if (typeof data.couplerBass === 'boolean') setCouplerBass(data.couplerBass);
+        if (typeof data.couplerMale === 'boolean') setCouplerMale(data.couplerMale);
+        if (typeof data.couplerFemale === 'boolean') {
+          setCouplerFemale(data.couplerFemale);
+        }
+        loadedCloudPrefsRef.current = true;
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, prefPath);
+      }
+    );
+
+    const presetsPath = `users/${user.uid}/presets`;
+    const unsubPresets = onSnapshot(
+      collection(db, 'users', user.uid, 'presets'),
+      (snap) => {
+        const list: HarmoniumPresetRecord[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          list.push({
+            id: docSnap.id,
+            ownerId: String(d.ownerId ?? user.uid),
+            name: String(d.name ?? 'Preset'),
+            labelMode:
+              d.labelMode === 'none' || d.labelMode === 'western'
+                ? d.labelMode
+                : 'sargam',
+            sargamOffset: typeof d.sargamOffset === 'number' ? d.sargamOffset : 0,
+            octave: typeof d.octave === 'number' ? d.octave : 4,
+            transpose: typeof d.transpose === 'number' ? d.transpose : 0,
+            volume: typeof d.volume === 'number' ? d.volume : 0.5,
+            reverbEnabled: Boolean(d.reverbEnabled),
+            reedMode: d.reedMode === 'double' ? 'double' : 'single',
+            couplerBass: Boolean(d.couplerBass),
+            couplerMale: Boolean(d.couplerMale),
+            couplerFemale: Boolean(d.couplerFemale),
+          });
+        });
+        setPresets(list);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, presetsPath);
+      }
+    );
+
+    return () => {
+      unsubPrefs();
+      unsubPresets();
+    };
+  }, [authReady, user]);
+
+  // Debounced auto-sync of user preferences to Firestore when signed in
+  useEffect(() => {
+    if (!authReady || !user || !loadedCloudPrefsRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      void saveUserPreferencesToCloud(user.uid, {
+        labelMode,
+        sargamOffset,
+        octave,
+        transpose,
+        volume,
+        reverbEnabled,
+        reedMode,
+        chordMode,
+        couplerBass,
+        couplerMale,
+        couplerFemale,
+      });
+    }, 600);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    authReady,
+    user,
+    labelMode,
+    sargamOffset,
+    octave,
+    transpose,
+    volume,
+    reverbEnabled,
+    reedMode,
+    chordMode,
+    couplerBass,
+    couplerMale,
+    couplerFemale,
+  ]);
+
+  const handleSavePreset = useCallback(async () => {
+    if (!user) return;
+    const trimmed = newPresetName.trim().slice(0, MAX_PRESET_NAME_LENGTH);
+    if (!trimmed) return;
+    const presetId = `preset_${Date.now()}`;
+    await saveHarmoniumPresetToCloud(user.uid, presetId, trimmed, {
+      labelMode,
+      sargamOffset,
+      octave,
+      transpose,
+      volume,
+      reverbEnabled,
+      reedMode,
+      couplerBass,
+      couplerMale,
+      couplerFemale,
+    });
+    setNewPresetName('');
+    setCloudStatus('Preset saved');
+    window.setTimeout(() => setCloudStatus(null), 2000);
+  }, [
+    user,
+    newPresetName,
+    labelMode,
+    sargamOffset,
+    octave,
+    transpose,
+    volume,
+    reverbEnabled,
+    reedMode,
+    couplerBass,
+    couplerMale,
+    couplerFemale,
+  ]);
+
+  const handleApplyPreset = useCallback((p: HarmoniumPresetRecord) => {
+    setLabelMode(p.labelMode);
+    setSargamOffset(p.sargamOffset);
+    setOctave(p.octave);
+    setTranspose(p.transpose);
+    setVolume(p.volume);
+    setReverbEnabled(p.reverbEnabled);
+    setReedMode(p.reedMode);
+    setCouplerBass(p.couplerBass);
+    setCouplerMale(p.couplerMale);
+    setCouplerFemale(p.couplerFemale);
+  }, []);
 
   const suggestedKeys = useMemo(() => {
     const suggestions = new Set<string>();
@@ -1004,6 +1220,99 @@ export function ImmersiveHarmonium() {
             touchAction: 'pan-y',
           }}
         >
+          {/* Cloud Sync & Saved Presets (Firebase) */}
+          <div className="rounded-xl border border-amber-500/20 bg-white/[0.04] p-2.5 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-amber-200/70">
+                Cloud Presets
+              </span>
+              {user ? (
+                <button
+                  type="button"
+                  onClick={() => void signOutUser()}
+                  className="px-2 py-0.5 text-[10px] font-semibold rounded-md border border-white/15 bg-white/5 text-amber-200/80 hover:bg-white/10"
+                >
+                  Sign Out
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void signInWithGoogle()}
+                  className="px-2.5 py-1 text-[10px] font-bold rounded-md bg-amber-400 text-amber-950 hover:bg-amber-300"
+                >
+                  Sign in with Google
+                </button>
+              )}
+            </div>
+
+            {user ? (
+              <div className="space-y-2">
+                <div className="text-[10px] text-amber-100/60 truncate">
+                  Synced: {user.email ?? user.displayName ?? 'Signed in'}
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    maxLength={MAX_PRESET_NAME_LENGTH}
+                    value={newPresetName}
+                    onChange={(e) =>
+                      setNewPresetName(
+                        e.target.value.slice(0, MAX_PRESET_NAME_LENGTH)
+                      )
+                    }
+                    placeholder="Preset name..."
+                    className="flex-1 min-w-0 rounded-md border border-white/15 bg-black/40 px-2 py-1 text-[11px] text-amber-100 placeholder:text-white/30 focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleSavePreset()}
+                    disabled={!newPresetName.trim()}
+                    className="rounded-md bg-teal-400 px-2.5 py-1 text-[10px] font-bold text-teal-950 disabled:opacity-40"
+                  >
+                    Save
+                  </button>
+                </div>
+                {cloudStatus && (
+                  <div className="text-[10px] text-emerald-300 font-medium">
+                    {cloudStatus}
+                  </div>
+                )}
+                {presets.length > 0 && (
+                  <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pt-1">
+                    {presets.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-center justify-between gap-1 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleApplyPreset(p)}
+                          className="flex-1 truncate text-left text-[11px] font-medium text-amber-100 hover:text-amber-300"
+                        >
+                          {p.name}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void deleteHarmoniumPresetFromCloud(user.uid, p.id)
+                          }
+                          className="text-[10px] text-rose-300/70 hover:text-rose-300 px-1"
+                          aria-label={`Delete ${p.name}`}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-[10px] text-white/45 leading-snug">
+                Sign in to sync your harmonium settings and save custom raga/octave presets in the cloud.
+              </p>
+            )}
+          </div>
+
           {/* Raga Suggestions */}
           <HUDRow label="Raga Suggestions">
             <HUDChip
