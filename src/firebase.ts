@@ -1,8 +1,11 @@
 import { initializeApp } from 'firebase/app';
 import {
+  browserPopupRedirectResolver,
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
@@ -19,6 +22,9 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({
+  prompt: 'select_account',
+});
 
 export enum OperationType {
   CREATE = 'create',
@@ -131,7 +137,78 @@ export interface HarmoniumPresetRecord {
 }
 
 export async function signInWithGoogle() {
-  return signInWithPopup(auth, googleProvider);
+  return signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
+}
+
+export async function signInWithGoogleRedirect() {
+  return signInWithRedirect(auth, googleProvider, browserPopupRedirectResolver);
+}
+
+export async function checkGoogleRedirectResult() {
+  return getRedirectResult(auth, browserPopupRedirectResolver);
+}
+
+export function formatAuthError(error: unknown): {
+  message: string;
+  code?: string;
+  domain?: string;
+} {
+  const errObj = error as { code?: string; message?: string } | null;
+  const code = typeof errObj?.code === 'string' ? errObj.code : undefined;
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? 'Sign-in failed');
+  const hostname =
+    typeof window !== 'undefined' ? window.location.hostname : '';
+
+  if (
+    code === 'auth/unauthorized-domain' ||
+    rawMessage.includes('auth/unauthorized-domain')
+  ) {
+    return {
+      code: 'auth/unauthorized-domain',
+      domain: hostname,
+      message: `Domain "${hostname}" is not authorized in Firebase Auth. Add "${hostname}" in Firebase Console → Authentication → Settings → Authorized domains.`,
+    };
+  }
+
+  if (
+    code === 'auth/popup-blocked' ||
+    rawMessage.includes('auth/popup-blocked')
+  ) {
+    return {
+      code: 'auth/popup-blocked',
+      message:
+        'Browser blocked the Google sign-in popup. Please allow popups or use Redirect Sign-In below.',
+    };
+  }
+
+  if (
+    code === 'auth/popup-closed-by-user' ||
+    code === 'auth/cancelled-popup-request' ||
+    rawMessage.includes('auth/popup-closed-by-user')
+  ) {
+    return {
+      code: 'auth/popup-closed-by-user',
+      message:
+        'Google sign-in popup was closed before finishing. If third-party cookies are blocked in this preview frame, try Redirect Sign-In or allow popups.',
+    };
+  }
+
+  if (
+    code === 'auth/operation-not-supported-in-this-environment' ||
+    rawMessage.includes('operation-not-supported-in-this-environment')
+  ) {
+    return {
+      code: 'auth/operation-not-supported-in-this-environment',
+      message:
+        'Popup sign-in is restricted in this browser context. Try Redirect Sign-In below.',
+    };
+  }
+
+  return {
+    code,
+    message: rawMessage,
+  };
 }
 
 export async function signOutUser() {

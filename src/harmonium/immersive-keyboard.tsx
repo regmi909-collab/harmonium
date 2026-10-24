@@ -3,8 +3,10 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { collection, doc, onSnapshot } from 'firebase/firestore';
 import {
   auth,
+  checkGoogleRedirectResult,
   db,
   deleteHarmoniumPresetFromCloud,
+  formatAuthError,
   handleFirestoreError,
   HarmoniumPresetRecord,
   MAX_PRESET_NAME_LENGTH,
@@ -12,6 +14,7 @@ import {
   saveHarmoniumPresetToCloud,
   saveUserPreferencesToCloud,
   signInWithGoogle,
+  signInWithGoogleRedirect,
   signOutUser,
 } from '../firebase';
 import {
@@ -393,10 +396,287 @@ export function ImmersiveHarmonium() {
 
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authErrorCode, setAuthErrorCode] = useState<string | undefined>(undefined);
+  const [authErrorDomain, setAuthErrorDomain] = useState<string | undefined>(undefined);
+  const [copiedDomain, setCopiedDomain] = useState(false);
   const [presets, setPresets] = useState<HarmoniumPresetRecord[]>([]);
   const [newPresetName, setNewPresetName] = useState('');
   const [cloudStatus, setCloudStatus] = useState<string | null>(null);
   const loadedCloudPrefsRef = useRef(false);
+
+  // Full Screen & Device Settings Lock state (with explicit user permission)
+  const [showPermissionPrompt, setShowPermissionPrompt] = useState(true);
+  const [deviceLockEnabled, setDeviceLockEnabled] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [keyboardLockActive, setKeyboardLockActive] = useState(false);
+  const [orientationLocked, setOrientationLocked] = useState(false);
+  const [lockStatusMessage, setLockStatusMessage] = useState<string | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+
+  const acquireWakeLock = useCallback(async () => {
+    try {
+      const nav = navigator as Navigator & {
+        wakeLock?: {
+          request: (
+            type: 'screen'
+          ) => Promise<{
+            release: () => Promise<void>;
+            addEventListener?: (type: string, listener: () => void) => void;
+          }>;
+        };
+      };
+      if (nav.wakeLock?.request) {
+        const sentinel = await nav.wakeLock.request('screen');
+        wakeLockRef.current = sentinel;
+        setWakeLockActive(true);
+        sentinel.addEventListener?.('release', () => {
+          setWakeLockActive(false);
+        });
+      }
+    } catch {
+      setWakeLockActive(false);
+    }
+  }, []);
+
+  const enableFullScreenAndDeviceLock = useCallback(async () => {
+    setDeviceLockEnabled(true);
+    setShowPermissionPrompt(false);
+    setLockStatusMessage(null);
+
+    let enteredFs = Boolean(
+      document.fullscreenElement ||
+        (document as Document & { webkitFullscreenElement?: Element | null })
+          .webkitFullscreenElement
+    );
+
+    try {
+      const docEl = document.documentElement as HTMLElement & {
+        webkitRequestFullscreen?: () => Promise<void>;
+        msRequestFullscreen?: () => Promise<void>;
+      };
+      if (!enteredFs) {
+        if (docEl.requestFullscreen) {
+          await docEl.requestFullscreen({ navigationUI: 'hide' });
+          enteredFs = true;
+        } else if (docEl.webkitRequestFullscreen) {
+          await docEl.webkitRequestFullscreen();
+          enteredFs = true;
+        } else if (docEl.msRequestFullscreen) {
+          await docEl.msRequestFullscreen();
+          enteredFs = true;
+        }
+      }
+    } catch {
+      setLockStatusMessage(
+        'Pad gesture shield active. (Browser frame restricted full-screen window; open in standalone tab for full screen).'
+      );
+    }
+
+    setIsFullscreen(
+      Boolean(
+        document.fullscreenElement ||
+          (document as Document & { webkitFullscreenElement?: Element | null })
+            .webkitFullscreenElement ||
+          enteredFs
+      )
+    );
+
+    // Lock screen orientation to landscape on supported tablets/pads
+    try {
+      const scr = window.screen as Screen & {
+        orientation?: {
+          lock?: (mode: string) => Promise<void>;
+        };
+      };
+      if (scr.orientation?.lock) {
+        await scr.orientation.lock('landscape');
+        setOrientationLocked(true);
+      }
+    } catch {
+      // Desktop or unsupported orientation lock
+    }
+
+    // Lock system keyboard shortcuts in Chromium fullscreen
+    try {
+      const nav = navigator as Navigator & {
+        keyboard?: {
+          lock?: (keys?: string[]) => Promise<void>;
+        };
+      };
+      if (nav.keyboard?.lock) {
+        await nav.keyboard.lock();
+        setKeyboardLockActive(true);
+      }
+    } catch {
+      // Unsupported outside top-level fullscreen
+    }
+
+    // Request Screen Wake Lock so display never dims or sleeps
+    await acquireWakeLock();
+  }, [acquireWakeLock]);
+
+  const disableFullScreenAndDeviceLock = useCallback(async () => {
+    setDeviceLockEnabled(false);
+    setLockStatusMessage(null);
+
+    try {
+      const nav = navigator as Navigator & {
+        keyboard?: { unlock?: () => void };
+      };
+      nav.keyboard?.unlock?.();
+      setKeyboardLockActive(false);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      const scr = window.screen as Screen & {
+        orientation?: { unlock?: () => void };
+      };
+      scr.orientation?.unlock?.();
+      setOrientationLocked(false);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+      setWakeLockActive(false);
+    } catch {
+      // Ignore
+    }
+
+    try {
+      const docWithWebkit = document as Document & {
+        webkitExitFullscreen?: () => Promise<void>;
+        webkitFullscreenElement?: Element | null;
+      };
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (docWithWebkit.webkitFullscreenElement && docWithWebkit.webkitExitFullscreen) {
+        await docWithWebkit.webkitExitFullscreen();
+      }
+      setIsFullscreen(false);
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  // Track fullscreen changes & re-acquire wake lock on visibility change
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fs = Boolean(
+        document.fullscreenElement ||
+          (document as Document & { webkitFullscreenElement?: Element | null })
+            .webkitFullscreenElement
+      );
+      setIsFullscreen(fs);
+      if (!fs) {
+        setKeyboardLockActive(false);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && deviceLockEnabled) {
+        void acquireWakeLock();
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener(
+        'webkitfullscreenchange',
+        handleFullscreenChange
+      );
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [deviceLockEnabled, acquireWakeLock]);
+
+  // Strict Chrome & Device Gesture Shield when enabled
+  useEffect(() => {
+    if (!deviceLockEnabled) return;
+
+    const preventGesture = (e: Event) => {
+      e.preventDefault();
+    };
+
+    const preventWheelZoom = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+      }
+    };
+
+    const preventBrowserTouchNavigation = (e: TouchEvent) => {
+      const target = e.target as HTMLElement | null;
+      // Allow vertical scrolling inside the options drawer or modal
+      if (target?.closest('[data-allow-scroll="true"]')) {
+        if (e.touches.length > 1) {
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    };
+
+    const preventBrowserHotkeys = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        return;
+      }
+      if (
+        e.key === 'F5' ||
+        e.key === 'F11' ||
+        (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) ||
+        ((e.ctrlKey || e.metaKey) &&
+          ['r', 'R', 'w', 'W', 't', 'T', '+', '-', '=', '0'].includes(e.key))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+
+    document.addEventListener('gesturestart', preventGesture, { passive: false });
+    document.addEventListener('gesturechange', preventGesture, { passive: false });
+    document.addEventListener('gestureend', preventGesture, { passive: false });
+    document.addEventListener('wheel', preventWheelZoom, { passive: false });
+    document.addEventListener('touchmove', preventBrowserTouchNavigation, {
+      passive: false,
+    });
+    document.addEventListener('selectstart', preventGesture);
+    document.addEventListener('dragstart', preventGesture);
+    window.addEventListener('keydown', preventBrowserHotkeys, { capture: true });
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      document.removeEventListener('gesturestart', preventGesture);
+      document.removeEventListener('gesturechange', preventGesture);
+      document.removeEventListener('gestureend', preventGesture);
+      document.removeEventListener('wheel', preventWheelZoom);
+      document.removeEventListener('touchmove', preventBrowserTouchNavigation);
+      document.removeEventListener('selectstart', preventGesture);
+      document.removeEventListener('dragstart', preventGesture);
+      window.removeEventListener('keydown', preventBrowserHotkeys, {
+        capture: true,
+      });
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [deviceLockEnabled]);
 
   // Restore / persist settings from localStorage
   useEffect(() => {
@@ -435,17 +715,79 @@ export function ImmersiveHarmonium() {
     }
   }, [labelMode, octave, transpose, volume, reverbEnabled, reedMode]);
 
-  // Firebase Auth listener
+  // Firebase Auth listener + Redirect result handler
   useEffect(() => {
+    void checkGoogleRedirectResult().catch((err) => {
+      const formatted = formatAuthError(err);
+      setAuthError(formatted.message);
+      setAuthErrorCode(formatted.code);
+      setAuthErrorDomain(formatted.domain);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setAuthReady(true);
-      if (!currentUser) {
+      setAuthLoading(false);
+      if (currentUser) {
+        setAuthError(null);
+        setAuthErrorCode(undefined);
+        setAuthErrorDomain(undefined);
+      } else {
         loadedCloudPrefsRef.current = false;
         setPresets([]);
       }
     });
     return () => unsubscribe();
+  }, []);
+
+  const handleGoogleSignIn = useCallback(async () => {
+    setAuthError(null);
+    setAuthErrorCode(undefined);
+    setAuthErrorDomain(undefined);
+    setAuthLoading(true);
+    try {
+      const result = await signInWithGoogle();
+      if (result.user) {
+        setCloudStatus(
+          `Signed in as ${result.user.email ?? result.user.displayName ?? 'User'}`
+        );
+        window.setTimeout(() => setCloudStatus(null), 3000);
+      }
+    } catch (err) {
+      const formatted = formatAuthError(err);
+      setAuthError(formatted.message);
+      setAuthErrorCode(formatted.code);
+      setAuthErrorDomain(formatted.domain);
+      setSidebarOpen(true);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleGoogleRedirectSignIn = useCallback(async () => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      await signInWithGoogleRedirect();
+    } catch (err) {
+      const formatted = formatAuthError(err);
+      setAuthError(formatted.message);
+      setAuthErrorCode(formatted.code);
+      setAuthErrorDomain(formatted.domain);
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    setAuthError(null);
+    try {
+      await signOutUser();
+      setCloudStatus('Signed out');
+      window.setTimeout(() => setCloudStatus(null), 2000);
+    } catch (err) {
+      const formatted = formatAuthError(err);
+      setAuthError(formatted.message);
+    }
   }, []);
 
   // Firestore listeners for user preferences & saved presets
@@ -950,22 +1292,93 @@ export function ImmersiveHarmonium() {
             ))}
           </div>
 
-          {/* Side Option Bar Toggle Button */}
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((v) => !v)}
-            className="relative z-20 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition-all"
-            style={{
-              background: sidebarOpen
-                ? 'rgba(245, 158, 11, 0.22)'
-                : 'linear-gradient(180deg,#d4a030 0%,#a07020 100%)',
-              color: sidebarOpen ? '#fde68a' : '#1a0a00',
-              border: '1px solid rgba(255, 200, 80, 0.45)',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.45)',
-            }}
-          >
-            <span>{sidebarOpen ? 'Hide Options >>' : '<< Options'}</span>
-          </button>
+          {/* Right Actions: Full Screen Lock + Google Account + Options Toggle */}
+          <div className="relative z-20 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (deviceLockEnabled && isFullscreen) {
+                  void disableFullScreenAndDeviceLock();
+                } else {
+                  setShowPermissionPrompt(true);
+                }
+              }}
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-all"
+              style={{
+                background:
+                  deviceLockEnabled && isFullscreen
+                    ? 'linear-gradient(180deg,#0f766e 0%,#115e59 100%)'
+                    : 'rgba(0,0,0,0.42)',
+                color:
+                  deviceLockEnabled && isFullscreen
+                    ? '#99f6e4'
+                    : '#fde68a',
+                border:
+                  deviceLockEnabled && isFullscreen
+                    ? '1px solid rgba(45,212,191,0.55)'
+                    : '1px solid rgba(255,200,80,0.35)',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
+              }}
+              title="Full Screen & Pad Gesture Lock"
+            >
+              <span>
+                {deviceLockEnabled && isFullscreen
+                  ? '🔒 Pad Locked'
+                  : deviceLockEnabled
+                    ? '🛡 Gesture Lock'
+                    : '⛶ Full Screen'}
+              </span>
+            </button>
+
+            {user ? (
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                className="hidden sm:flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-semibold transition-all"
+                style={{
+                  background: 'rgba(16, 185, 129, 0.16)',
+                  color: '#a7f3d0',
+                  border: '1px solid rgba(52, 211, 153, 0.4)',
+                }}
+                title={user.email ?? 'Signed in'}
+              >
+                <span className="truncate max-w-[110px]">
+                  ● {user.displayName ?? user.email ?? 'Synced'}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleGoogleSignIn()}
+                disabled={authLoading}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-all disabled:opacity-50"
+                style={{
+                  background: 'rgba(255, 255, 255, 0.92)',
+                  color: '#1e293b',
+                  border: '1px solid rgba(255, 255, 255, 0.5)',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
+                }}
+              >
+                <span>{authLoading ? 'Signing in...' : 'G Sign In'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition-all"
+              style={{
+                background: sidebarOpen
+                  ? 'rgba(245, 158, 11, 0.22)'
+                  : 'linear-gradient(180deg,#d4a030 0%,#a07020 100%)',
+                color: sidebarOpen ? '#fde68a' : '#1a0a00',
+                border: '1px solid rgba(255, 200, 80, 0.45)',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.45)',
+              }}
+            >
+              <span>{sidebarOpen ? 'Hide Options >>' : '<< Options'}</span>
+            </button>
+          </div>
         </div>
 
         {/* Full-Height Key Bed */}
@@ -1211,25 +1624,86 @@ export function ImmersiveHarmonium() {
       {/* ══ RIGHT SIDE OPTION BAR (SLIDE-OVER DRAWER SO KEYS STAY WIDE) ══ */}
       {sidebarOpen && (
         <aside
+          data-allow-scroll="true"
           className="absolute right-0 top-[52px] bottom-[22px] z-40 flex flex-col gap-3 overflow-y-auto border-l border-amber-500/25 p-3.5"
           style={{
-            width: 272,
+            width: 286,
             background: 'rgba(12,6,1,.96)',
             backdropFilter: 'blur(16px)',
             boxShadow: '-12px 0 36px rgba(0,0,0,0.85)',
             touchAction: 'pan-y',
           }}
         >
+          {/* Full Screen & Pad Gesture Lock Card */}
+          <div className="rounded-xl border border-teal-500/25 bg-teal-950/25 p-2.5 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-teal-200/80">
+                Full Screen & Pad Lock
+              </span>
+              <span
+                className={cn(
+                  'px-2 py-0.5 text-[9px] font-bold uppercase rounded-full',
+                  deviceLockEnabled
+                    ? 'bg-teal-400/20 text-teal-300 border border-teal-400/40'
+                    : 'bg-white/10 text-white/50'
+                )}
+              >
+                {deviceLockEnabled ? 'Active' : 'Unlocked'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1 text-[9px] text-amber-100/70">
+              <div className="rounded bg-black/30 px-2 py-1 border border-white/5">
+                Display: <strong className="text-amber-200">{isFullscreen ? 'Full Screen' : 'Windowed'}</strong>
+              </div>
+              <div className="rounded bg-black/30 px-2 py-1 border border-white/5">
+                Wake Lock: <strong className="text-amber-200">{wakeLockActive ? 'Awake' : 'Standard'}</strong>
+              </div>
+              <div className="rounded bg-black/30 px-2 py-1 border border-white/5">
+                Key Shield: <strong className="text-amber-200">{keyboardLockActive ? 'Locked' : 'Touch Only'}</strong>
+              </div>
+              <div className="rounded bg-black/30 px-2 py-1 border border-white/5">
+                Rotation: <strong className="text-amber-200">{orientationLocked ? 'Landscape' : 'Auto'}</strong>
+              </div>
+            </div>
+
+            {lockStatusMessage && (
+              <p className="text-[10px] text-amber-300/90 leading-snug bg-amber-500/10 border border-amber-500/25 rounded-md p-1.5">
+                {lockStatusMessage}
+              </p>
+            )}
+
+            <div className="flex gap-1.5">
+              {!deviceLockEnabled || !isFullscreen ? (
+                <button
+                  type="button"
+                  onClick={() => setShowPermissionPrompt(true)}
+                  className="flex-1 rounded-md bg-teal-400 px-2.5 py-1.5 text-[10px] font-bold text-teal-950 hover:bg-teal-300 transition"
+                >
+                  Ask Permission & Lock Pad
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void disableFullScreenAndDeviceLock()}
+                  className="flex-1 rounded-md border border-white/20 bg-white/10 px-2.5 py-1.5 text-[10px] font-semibold text-amber-100 hover:bg-white/15 transition"
+                >
+                  Unlock & Exit Full Screen
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Cloud Sync & Saved Presets (Firebase) */}
           <div className="rounded-xl border border-amber-500/20 bg-white/[0.04] p-2.5 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-semibold uppercase tracking-widest text-amber-200/70">
-                Cloud Presets
+                Google Cloud Sync
               </span>
               {user ? (
                 <button
                   type="button"
-                  onClick={() => void signOutUser()}
+                  onClick={() => void handleSignOut()}
                   className="px-2 py-0.5 text-[10px] font-semibold rounded-md border border-white/15 bg-white/5 text-amber-200/80 hover:bg-white/10"
                 >
                   Sign Out
@@ -1237,18 +1711,66 @@ export function ImmersiveHarmonium() {
               ) : (
                 <button
                   type="button"
-                  onClick={() => void signInWithGoogle()}
-                  className="px-2.5 py-1 text-[10px] font-bold rounded-md bg-amber-400 text-amber-950 hover:bg-amber-300"
+                  onClick={() => void handleGoogleSignIn()}
+                  disabled={authLoading}
+                  className="px-2.5 py-1 text-[10px] font-bold rounded-md bg-amber-400 text-amber-950 hover:bg-amber-300 disabled:opacity-50"
                 >
-                  Sign in with Google
+                  {authLoading ? 'Signing in...' : 'Sign in with Google'}
                 </button>
               )}
             </div>
 
+            {authError && (
+              <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 p-2 space-y-1.5">
+                <p className="text-[10px] text-rose-200 leading-snug font-medium">
+                  {authError}
+                </p>
+                {authErrorDomain && (
+                  <div className="flex items-center gap-1.5 pt-0.5">
+                    <code className="flex-1 truncate rounded bg-black/50 px-1.5 py-0.5 text-[9px] text-amber-200 select-all">
+                      {authErrorDomain}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(authErrorDomain);
+                        setCopiedDomain(true);
+                        window.setTimeout(() => setCopiedDomain(false), 2000);
+                      }}
+                      className="rounded bg-amber-400/20 border border-amber-400/40 px-2 py-0.5 text-[9px] font-semibold text-amber-200"
+                    >
+                      {copiedDomain ? 'Copied!' : 'Copy Domain'}
+                    </button>
+                  </div>
+                )}
+                {(authErrorCode === 'auth/popup-blocked' ||
+                  authErrorCode === 'auth/popup-closed-by-user' ||
+                  authErrorCode ===
+                    'auth/operation-not-supported-in-this-environment') && (
+                  <div className="flex gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => void handleGoogleSignIn()}
+                      className="flex-1 rounded bg-amber-400 px-2 py-1 text-[10px] font-bold text-amber-950"
+                    >
+                      Retry Popup
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleGoogleRedirectSignIn()}
+                      className="flex-1 rounded border border-amber-300/40 bg-amber-500/20 px-2 py-1 text-[10px] font-semibold text-amber-100"
+                    >
+                      Redirect Sign-In
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {user ? (
               <div className="space-y-2">
-                <div className="text-[10px] text-amber-100/60 truncate">
-                  Synced: {user.email ?? user.displayName ?? 'Signed in'}
+                <div className="text-[10px] text-emerald-300/90 truncate font-medium">
+                  ● Synced: {user.email ?? user.displayName ?? 'Signed in'}
                 </div>
                 <div className="flex gap-1.5">
                   <input
@@ -1261,7 +1783,7 @@ export function ImmersiveHarmonium() {
                       )
                     }
                     placeholder="Preset name..."
-                    className="flex-1 min-w-0 rounded-md border border-white/15 bg-black/40 px-2 py-1 text-[11px] text-amber-100 placeholder:text-white/30 focus:outline-none focus:border-amber-400"
+                    className="flex-1 min-w-0 rounded-md border border-white/15 bg-black/40 px-2 py-1 text-[11px] text-amber-100 placeholder:text-white/30 focus:outline-none focus:border-amber-400 select-text"
                   />
                   <button
                     type="button"
@@ -1308,7 +1830,7 @@ export function ImmersiveHarmonium() {
               </div>
             ) : (
               <p className="text-[10px] text-white/45 leading-snug">
-                Sign in to sync your harmonium settings and save custom raga/octave presets in the cloud.
+                Sign in with Google to sync your harmonium settings and save custom raga/octave presets in the cloud.
               </p>
             )}
           </div>
@@ -1639,6 +2161,95 @@ export function ImmersiveHarmonium() {
             {playbackMode === 'samples' ? 'Sample' : 'Synth'} · 23 keys
           </div>
         </aside>
+      )}
+
+      {/* ══ PERMISSION MODAL FOR FULL SCREEN & CHROME/PAD GESTURE LOCK ══ */}
+      {showPermissionPrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{
+            background: 'rgba(10, 5, 1, 0.82)',
+            backdropFilter: 'blur(10px)',
+          }}
+        >
+          <div
+            data-allow-scroll="true"
+            className="w-full max-w-md rounded-2xl border border-amber-500/35 p-5 shadow-2xl space-y-4"
+            style={{
+              background:
+                'linear-gradient(180deg, rgba(42, 21, 6, 0.98) 0%, rgba(20, 10, 2, 0.99) 100%)',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.9)',
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="inline-block rounded-full bg-amber-500/20 border border-amber-400/35 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-1.5">
+                  Permission Request
+                </span>
+                <h2 className="text-base font-bold text-amber-100">
+                  Enable Full Screen &amp; Disable Chrome / Pad Gestures?
+                </h2>
+              </div>
+            </div>
+
+            <p className="text-xs text-amber-100/75 leading-relaxed">
+              To play chords and fast taans with 3+ fingers without Chrome or your tablet interrupting, SargamPad requests your permission to activate:
+            </p>
+
+            <ul className="space-y-1.5 text-[11px] text-amber-100/85 bg-black/35 rounded-xl p-3 border border-white/10">
+              <li className="flex items-start gap-2">
+                <span className="text-teal-400 font-bold">1.</span>
+                <span>
+                  <strong>Immersive Full Screen (`navigationUI: hide`):</strong> Hides Chrome tabs, address bar, status bar, and Android navigation bar.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-teal-400 font-bold">2.</span>
+                <span>
+                  <strong>Multi-Finger &amp; Chrome Gesture Shield:</strong> Blocks pull-to-refresh, edge back/forward swipe, pinch-to-zoom, and context menus.
+                </span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-teal-400 font-bold">3.</span>
+                <span>
+                  <strong>Landscape &amp; Wake Lock + Key Shield:</strong> Locks horizontal orientation, keeps the screen awake, and captures system hotkeys.
+                </span>
+              </li>
+            </ul>
+
+            <div className="flex flex-col sm:flex-row items-center gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => void enableFullScreenAndDeviceLock()}
+                className="w-full sm:flex-1 rounded-xl py-2.5 px-4 text-xs font-bold uppercase tracking-wider text-amber-950 transition-all cursor-pointer"
+                style={{
+                  background:
+                    'linear-gradient(180deg, #fbbf24 0%, #d97706 100%)',
+                  boxShadow: '0 4px 16px rgba(245, 158, 11, 0.4)',
+                }}
+              >
+                Allow &amp; Enter Full Screen Lock
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeviceLockEnabled(true);
+                  setShowPermissionPrompt(false);
+                }}
+                className="w-full sm:w-auto rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 py-2.5 px-3.5 text-xs font-semibold text-amber-200/80 transition-all cursor-pointer"
+              >
+                Gesture Lock Only
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPermissionPrompt(false)}
+                className="w-full sm:w-auto rounded-xl py-2.5 px-3 text-xs font-medium text-white/45 hover:text-white/75 transition-all cursor-pointer"
+              >
+                Not Now
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
